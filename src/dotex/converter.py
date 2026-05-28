@@ -1521,8 +1521,6 @@ def postprocess_generated_docx(
 
     document_tree = ET.fromstring(document_xml)
     changed = False
-    if enable_zotero:
-        populate_zotero_anchor_aliases_from_bibliography(document_tree, zotero_context, bibliography_heading)
     changed |= apply_table_hints(document_tree, template_hints, document_layout_hints)
     changed |= apply_figure_hints(document_tree, document_layout_hints)
     changed |= apply_body_paragraph_hints(document_tree, template_hints, bibliography_heading)
@@ -1943,6 +1941,16 @@ def find_direct_parent(root: ET.Element, target: ET.Element) -> ET.Element | Non
     return None
 
 
+def infer_bibliography_target_from_anchor(anchor: str, zotero_context: ZoteroDocxContext) -> CitationTarget | None:
+    match = re.fullmatch(r"(?:_+)?[Rr]ef(\d+)", anchor.strip())
+    if not match:
+        return None
+    index = int(match.group(1)) - 1
+    if index < 0 or index >= len(zotero_context.bibliography_entries):
+        return None
+    return zotero_context.bibliography_entries[index]
+
+
 def resolve_citation_hyperlink_target(
     element: ET.Element,
     relationship_targets: dict[str, str],
@@ -1954,6 +1962,10 @@ def resolve_citation_hyperlink_target(
     anchor = element.get(f"{WORD_ATTR_PREFIX}anchor")
     if anchor:
         target = zotero_context.lookup(anchor=anchor)
+        if target is None:
+            target = infer_bibliography_target_from_anchor(anchor, zotero_context)
+            if target is not None:
+                zotero_context.by_anchor[anchor] = target
         if target is not None:
             return target
         if looks_like_citation_display_text(display_text):
@@ -1966,6 +1978,10 @@ def resolve_citation_hyperlink_target(
         target_anchor = extract_anchor_from_relationship_target(target)
         if target_anchor:
             resolved_target = zotero_context.lookup(anchor=target_anchor)
+            if resolved_target is None:
+                resolved_target = infer_bibliography_target_from_anchor(target_anchor, zotero_context)
+                if resolved_target is not None:
+                    zotero_context.by_anchor[target_anchor] = resolved_target
             if resolved_target is not None:
                 return resolved_target
             if looks_like_citation_display_text(display_text):

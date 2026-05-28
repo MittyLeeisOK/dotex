@@ -3,6 +3,7 @@ import xml.etree.ElementTree as ET
 
 from dotex.converter import (
     WORD_ATTR_PREFIX,
+    CitationTarget,
     ZoteroDocxContext,
     resolve_citation_hyperlink_target,
     strip_all_bookmarks,
@@ -71,6 +72,37 @@ class ZoteroModeTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(len(document.findall('.//w:hyperlink', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})), 0)
         self.assertEqual(len(document.findall('.//w:t', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})), 1)
+
+    def test_ref_anchor_index_maps_without_bookmarks(self) -> None:
+        paragraph = ET.Element(f"{WORD_ATTR_PREFIX}p")
+        hyperlink = ET.SubElement(paragraph, f"{WORD_ATTR_PREFIX}hyperlink")
+        hyperlink.set(f"{WORD_ATTR_PREFIX}anchor", "_Ref1")
+        run = ET.SubElement(hyperlink, f"{WORD_ATTR_PREFIX}r")
+        text = ET.SubElement(run, f"{WORD_ATTR_PREFIX}t")
+        text.text = "Lang et al. 2025"
+
+        target = CitationTarget(
+            source_key="bib-1",
+            formatted_reference="Lang et al. 2025",
+            zotero_item_key="ABCD1234",
+            item_data={"id": "ABCD1234", "title": "Demo"},
+            uri="http://zotero.org/users/local/items/ABCD1234",
+            anchor_id="bib-1",
+        )
+        context = ZoteroDocxContext(
+            bibliography_entries=[target],
+            unmatched_notices=[],
+            by_anchor={},
+            by_normalized_url={},
+            by_normalized_doi={},
+        )
+
+        resolved = resolve_citation_hyperlink_target(hyperlink, {}, context)
+
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        self.assertEqual(resolved.zotero_item_key, "ABCD1234")
+        self.assertEqual(context.by_anchor.get("_Ref1"), resolved)
 
 
 if __name__ == "__main__":
