@@ -78,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Heading text used to locate the bibliography section in the generated DOCX.",
     )
     convert_parser.add_argument(
+        "-Z",
         "-z",
         "--zotero",
         dest="enable_zotero",

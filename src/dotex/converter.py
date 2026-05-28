@@ -1950,31 +1950,37 @@ def resolve_citation_hyperlink_target(
 ) -> CitationTarget | None:
     if element.tag != f"{WORD_ATTR_PREFIX}hyperlink":
         return None
+    display_text = get_element_text(element)
     anchor = element.get(f"{WORD_ATTR_PREFIX}anchor")
     if anchor:
         target = zotero_context.lookup(anchor=anchor)
         if target is not None:
             return target
-        display_text = get_element_text(element)
         if looks_like_citation_display_text(display_text):
             fallback_target = synthesize_inline_citation_target(display_text, anchor)
             zotero_context.by_anchor[anchor] = fallback_target
             return fallback_target
     rel_id = element.get(f"{REL_ATTR_PREFIX}id")
-    if rel_id is None:
-        return None
-    target = relationship_targets.get(rel_id)
-    target_anchor = extract_anchor_from_relationship_target(target)
-    if target_anchor:
-        resolved_target = zotero_context.lookup(anchor=target_anchor)
+    if rel_id is not None:
+        target = relationship_targets.get(rel_id)
+        target_anchor = extract_anchor_from_relationship_target(target)
+        if target_anchor:
+            resolved_target = zotero_context.lookup(anchor=target_anchor)
+            if resolved_target is not None:
+                return resolved_target
+            if looks_like_citation_display_text(display_text):
+                fallback_target = synthesize_inline_citation_target(display_text, target_anchor)
+                zotero_context.by_anchor[target_anchor] = fallback_target
+                return fallback_target
+        resolved_target = zotero_context.lookup(target)
         if resolved_target is not None:
             return resolved_target
-        display_text = get_element_text(element)
-        if looks_like_citation_display_text(display_text):
-            fallback_target = synthesize_inline_citation_target(display_text, target_anchor)
-            zotero_context.by_anchor[target_anchor] = fallback_target
-            return fallback_target
-    return zotero_context.lookup(target)
+    if looks_like_citation_display_text(display_text):
+        synthetic_anchor = make_anchor_id(f"inline-cite-{display_text}")
+        fallback_target = synthesize_inline_citation_target(display_text, synthetic_anchor)
+        zotero_context.by_anchor[synthetic_anchor] = fallback_target
+        return fallback_target
+    return None
 
 
 def extract_anchor_from_relationship_target(target: str | None) -> str | None:
