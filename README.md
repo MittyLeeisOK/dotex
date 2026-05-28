@@ -251,6 +251,7 @@ When `-z` / `--zotero` is used:
 - DOCX postprocessing converts matched bibliography links into Zotero `CSL_CITATION` fields
 - citation groups such as `(A 2024; B 2025)` are reconstructed as a single field
 - bibliography paragraphs receive a `CSL_BIBLIOGRAPHY` field wrapper
+- the final DOCX strips bibliography bookmarks after field reconstruction, so Zotero mode does not leave bookmark clutter behind
 - entries missing from the local Zotero library are written to a companion Excel checklist next to the generated DOCX
 - when Zotero mode is enabled, all recognized citation groups are emitted as Zotero fields even if some items are not yet matched in the local Zotero library
 - unmatched items therefore remain present inside Zotero field payloads, but may still lack a resolved Zotero URI until those items are imported and the DOCX is regenerated
