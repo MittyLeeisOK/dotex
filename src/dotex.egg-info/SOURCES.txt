@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+src/dotex/__init__.py
+src/dotex/__main__.py
+src/dotex/cli.py
+src/dotex/converter.py
+src/dotex/docx_inspector.py
+src/dotex/docx_to_tex.py
+src/dotex/roundtrip_compare.py
+src/dotex/zotero_resolver.py
+src/dotex.egg-info/PKG-INFO
+src/dotex.egg-info/SOURCES.txt
+src/dotex.egg-info/dependency_links.txt
+src/dotex.egg-info/entry_points.txt
+src/dotex.egg-info/requires.txt
+src/dotex.egg-info/top_level.txt
+src/dotex/templates/default_reference.docx
