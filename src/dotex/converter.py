@@ -1536,6 +1536,7 @@ def postprocess_generated_docx(
     if enable_zotero:
         changed |= convert_citation_hyperlinks_to_zotero_fields(document_tree, relationship_targets, zotero_context)
     changed |= strip_internal_hyperlink_styles(document_tree)
+    changed |= strip_all_bookmarks(document_tree)
     if not changed:
         return
 
@@ -1649,6 +1650,23 @@ def apply_body_paragraph_hints(
         if style_id not in {None, "BodyText", "FirstParagraph"}:
             continue
         set_paragraph_style_id(paragraph, hints.normal_style_id)
+        changed = True
+    return changed
+
+
+def strip_all_bookmarks(document_tree: ET.Element) -> bool:
+    changed = False
+    for bookmark in document_tree.findall(".//w:bookmarkStart", XML_NAMESPACES):
+        parent = find_direct_parent(document_tree, bookmark)
+        if parent is None:
+            continue
+        parent.remove(bookmark)
+        changed = True
+    for bookmark in document_tree.findall(".//w:bookmarkEnd", XML_NAMESPACES):
+        parent = find_direct_parent(document_tree, bookmark)
+        if parent is None:
+            continue
+        parent.remove(bookmark)
         changed = True
     return changed
 
@@ -1945,7 +1963,33 @@ def resolve_citation_hyperlink_target(
     rel_id = element.get(f"{REL_ATTR_PREFIX}id")
     if rel_id is None:
         return None
-    return zotero_context.lookup(relationship_targets.get(rel_id))
+    target = relationship_targets.get(rel_id)
+    target_anchor = extract_anchor_from_relationship_target(target)
+    if target_anchor:
+        resolved_target = zotero_context.lookup(anchor=target_anchor)
+        if resolved_target is not None:
+            return resolved_target
+        display_text = get_element_text(element)
+        if looks_like_citation_display_text(display_text):
+            fallback_target = synthesize_inline_citation_target(display_text, target_anchor)
+            zotero_context.by_anchor[target_anchor] = fallback_target
+            return fallback_target
+    return zotero_context.lookup(target)
+
+
+def extract_anchor_from_relationship_target(target: str | None) -> str | None:
+    if not target:
+        return None
+    if target.startswith("#"):
+        anchor = target[1:]
+    elif "#" in target:
+        anchor = target.split("#", 1)[1]
+    elif "://" not in target and "/" not in target and "\\" not in target:
+        anchor = target
+    else:
+        return None
+    anchor = anchor.strip()
+    return anchor or None
 
 
 def looks_like_citation_display_text(text: str) -> bool:
