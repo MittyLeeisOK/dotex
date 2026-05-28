@@ -1690,7 +1690,9 @@ def populate_zotero_anchor_aliases_from_bibliography(
         if child.tag != f"{WORD_ATTR_PREFIX}p":
             pending_bookmark_names = []
             continue
-        if not pending_bookmark_names:
+        bookmark_names = pending_bookmark_names + bibliography_bookmark_names(child)
+        pending_bookmark_names = []
+        if not bookmark_names:
             continue
 
         target = match_bibliography_paragraph_target(child, zotero_context.bibliography_entries, used_source_keys)
@@ -1705,9 +1707,17 @@ def populate_zotero_anchor_aliases_from_bibliography(
             continue
 
         used_source_keys.add(target.source_key)
-        for bookmark_name in pending_bookmark_names:
+        for bookmark_name in bookmark_names:
             zotero_context.by_anchor[bookmark_name] = target
-        pending_bookmark_names = []
+
+
+def bibliography_bookmark_names(paragraph: ET.Element) -> list[str]:
+    bookmark_names: list[str] = []
+    for bookmark in paragraph.findall(".//w:bookmarkStart", XML_NAMESPACES):
+        name = bookmark.get(f"{WORD_ATTR_PREFIX}name")
+        if name and not name.startswith("_Toc"):
+            bookmark_names.append(name)
+    return bookmark_names
 
 
 def strip_bibliography_bookmarks(document_tree: ET.Element, bibliography_heading_index: int) -> bool:
@@ -1723,15 +1733,19 @@ def strip_bibliography_bookmarks(document_tree: ET.Element, bibliography_heading
     body_children = list(body)
     heading_body_index = body_children.index(heading_paragraph)
     removable_nodes: list[ET.Element] = []
+    removed_in_paragraphs = False
     for child in body_children[heading_body_index + 1 :]:
         if child.tag == f"{WORD_ATTR_PREFIX}sectPr":
             break
         if child.tag in {f"{WORD_ATTR_PREFIX}bookmarkStart", f"{WORD_ATTR_PREFIX}bookmarkEnd"}:
             removable_nodes.append(child)
+            continue
+        if child.tag == f"{WORD_ATTR_PREFIX}p" and strip_bookmarks_in_paragraph(child):
+            removed_in_paragraphs = True
 
     for removable in removable_nodes:
         body.remove(removable)
-    return bool(removable_nodes)
+    return bool(removable_nodes) or removed_in_paragraphs
 
 
 def match_bibliography_paragraph_target(
@@ -1802,7 +1816,7 @@ def apply_bibliography_hints(
         if flatten_hyperlinks_in_paragraph(paragraph):
             changed = True
 
-    if enable_zotero and not zotero_context.unmatched_notices and strip_bibliography_bookmarks(document_tree, bibliography_heading_index):
+    if enable_zotero and strip_bibliography_bookmarks(document_tree, bibliography_heading_index):
         changed = True
 
     if not enable_zotero:
@@ -1936,7 +1950,14 @@ def resolve_citation_hyperlink_target(
 
 def looks_like_citation_display_text(text: str) -> bool:
     normalized = text.replace("\xa0", " ").strip()
-    return bool(re.search(r"(19|20)\d{2}", normalized) and re.search(r"[A-Za-z]", normalized))
+    if not normalized or len(normalized) > 200:
+        return False
+    has_year = bool(re.search(r"(19|20)\d{2}", normalized))
+    has_numeric_citation = bool(
+        re.fullmatch(r"[\[(（【]?\s*\d+(?:\s*[-,，;；–]\s*\d+)*\s*[\])）】]?", normalized)
+    )
+    has_word_like_text = bool(re.search(r"[\w\u4e00-\u9fff]", normalized))
+    return has_word_like_text and (has_year or has_numeric_citation)
 
 
 def synthesize_inline_citation_target(display_text: str, anchor: str) -> CitationTarget:
