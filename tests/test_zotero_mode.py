@@ -6,6 +6,7 @@ from dotex.converter import (
     ZoteroDocxContext,
     resolve_citation_hyperlink_target,
     strip_all_bookmarks,
+    strip_internal_hyperlink_styles,
 )
 
 
@@ -53,6 +54,23 @@ class ZoteroModeTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(len(document.findall('.//w:bookmarkStart', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})), 0)
         self.assertEqual(len(document.findall('.//w:bookmarkEnd', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})), 0)
+
+    def test_internal_anchor_hyperlinks_are_flattened(self) -> None:
+        document = ET.Element(f"{WORD_ATTR_PREFIX}document")
+        body = ET.SubElement(document, f"{WORD_ATTR_PREFIX}body")
+        paragraph = ET.SubElement(body, f"{WORD_ATTR_PREFIX}p")
+
+        hyperlink = ET.SubElement(paragraph, f"{WORD_ATTR_PREFIX}hyperlink")
+        hyperlink.set(f"{WORD_ATTR_PREFIX}anchor", "ref-1")
+        run = ET.SubElement(hyperlink, f"{WORD_ATTR_PREFIX}r")
+        text = ET.SubElement(run, f"{WORD_ATTR_PREFIX}t")
+        text.text = "Smith 2020"
+
+        changed = strip_internal_hyperlink_styles(document)
+
+        self.assertTrue(changed)
+        self.assertEqual(len(document.findall('.//w:hyperlink', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})), 0)
+        self.assertEqual(len(document.findall('.//w:t', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})), 1)
 
 
 if __name__ == "__main__":

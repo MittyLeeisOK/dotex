@@ -2145,10 +2145,44 @@ def trim_run_text_prefix(run: ET.Element, length: int) -> None:
 
 def strip_internal_hyperlink_styles(document_tree: ET.Element) -> bool:
     changed = False
+    for paragraph in document_tree.findall(".//w:p", XML_NAMESPACES):
+        if flatten_internal_hyperlinks_in_paragraph(paragraph):
+            changed = True
     for hyperlink in document_tree.findall(".//w:hyperlink", XML_NAMESPACES):
         for run_properties in hyperlink.findall(".//w:rPr", XML_NAMESPACES):
             if remove_run_style(run_properties):
                 changed = True
+    return changed
+
+
+def flatten_internal_hyperlinks_in_paragraph(paragraph: ET.Element) -> bool:
+    changed = False
+    for child in list(paragraph):
+        if child.tag != f"{WORD_ATTR_PREFIX}hyperlink":
+            continue
+        if child.get(f"{REL_ATTR_PREFIX}id"):
+            continue
+        insert_at = list(paragraph).index(child)
+        replacement_runs: list[ET.Element] = []
+        for run in child.findall("w:r", XML_NAMESPACES):
+            new_run = ET.Element(f"{WORD_ATTR_PREFIX}r")
+            run_properties = run.find("w:rPr", XML_NAMESPACES)
+            if run_properties is not None:
+                cloned_properties = clone_element(run_properties)
+                remove_run_style(cloned_properties)
+                new_run.append(cloned_properties)
+            for node in list(run):
+                if node.tag == f"{WORD_ATTR_PREFIX}rPr":
+                    continue
+                new_run.append(clone_element(node))
+            if len(new_run):
+                replacement_runs.append(new_run)
+        if not replacement_runs:
+            replacement_runs.append(build_field_run(text=get_element_text(child)))
+        paragraph.remove(child)
+        for offset, new_run in enumerate(replacement_runs):
+            paragraph.insert(insert_at + offset, new_run)
+        changed = True
     return changed
 
 
