@@ -1535,15 +1535,31 @@ def postprocess_generated_docx(
         changed |= convert_citation_hyperlinks_to_zotero_fields(document_tree, relationship_targets, zotero_context)
     changed |= strip_internal_hyperlink_styles(document_tree)
     changed |= strip_all_bookmarks(document_tree)
+
+    updated_parts: dict[str, bytes] = {
+        "word/document.xml": ET.tostring(document_tree, encoding="utf-8", xml_declaration=True)
+    }
+
+    for info, data in archive_entries:
+        if info.filename in updated_parts:
+            continue
+        if not info.filename.startswith("word/") or not info.filename.endswith(".xml"):
+            continue
+        if info.filename == "word/styles.xml":
+            continue
+        tree = ET.fromstring(data)
+        if strip_all_bookmarks(tree):
+            updated_parts[info.filename] = ET.tostring(tree, encoding="utf-8", xml_declaration=True)
+            changed = True
+
     if not changed:
         return
 
-    updated_document = ET.tostring(document_tree, encoding="utf-8", xml_declaration=True)
     temp_output = output_docx.with_suffix(".tmp.docx")
     with ZipFile(temp_output, "w", compression=ZIP_DEFLATED) as target_zip:
         for info, data in archive_entries:
-            if info.filename == "word/document.xml":
-                target_zip.writestr(info, updated_document)
+            if info.filename in updated_parts:
+                target_zip.writestr(info, updated_parts[info.filename])
                 continue
             target_zip.writestr(info, data)
     temp_output.replace(output_docx)
