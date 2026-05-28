@@ -1521,8 +1521,6 @@ def postprocess_generated_docx(
 
     document_tree = ET.fromstring(document_xml)
     changed = False
-    if enable_zotero:
-        populate_zotero_anchor_aliases_from_bibliography(document_tree, zotero_context, bibliography_heading)
     changed |= apply_table_hints(document_tree, template_hints, document_layout_hints)
     changed |= apply_figure_hints(document_tree, document_layout_hints)
     changed |= apply_body_paragraph_hints(document_tree, template_hints, bibliography_heading)
@@ -1537,15 +1535,31 @@ def postprocess_generated_docx(
         changed |= convert_citation_hyperlinks_to_zotero_fields(document_tree, relationship_targets, zotero_context)
     changed |= strip_internal_hyperlink_styles(document_tree)
     changed |= strip_all_bookmarks(document_tree)
+
+    updated_parts: dict[str, bytes] = {
+        "word/document.xml": ET.tostring(document_tree, encoding="utf-8", xml_declaration=True)
+    }
+
+    for info, data in archive_entries:
+        if info.filename in updated_parts:
+            continue
+        if not info.filename.startswith("word/") or not info.filename.endswith(".xml"):
+            continue
+        if info.filename == "word/styles.xml":
+            continue
+        tree = ET.fromstring(data)
+        if strip_all_bookmarks(tree):
+            updated_parts[info.filename] = ET.tostring(tree, encoding="utf-8", xml_declaration=True)
+            changed = True
+
     if not changed:
         return
 
-    updated_document = ET.tostring(document_tree, encoding="utf-8", xml_declaration=True)
     temp_output = output_docx.with_suffix(".tmp.docx")
     with ZipFile(temp_output, "w", compression=ZIP_DEFLATED) as target_zip:
         for info, data in archive_entries:
-            if info.filename == "word/document.xml":
-                target_zip.writestr(info, updated_document)
+            if info.filename in updated_parts:
+                target_zip.writestr(info, updated_parts[info.filename])
                 continue
             target_zip.writestr(info, data)
     temp_output.replace(output_docx)
@@ -1943,6 +1957,16 @@ def find_direct_parent(root: ET.Element, target: ET.Element) -> ET.Element | Non
     return None
 
 
+def infer_bibliography_target_from_anchor(anchor: str, zotero_context: ZoteroDocxContext) -> CitationTarget | None:
+    match = re.fullmatch(r"(?:_+)?[Rr]ef(\d+)", anchor.strip())
+    if not match:
+        return None
+    index = int(match.group(1)) - 1
+    if index < 0 or index >= len(zotero_context.bibliography_entries):
+        return None
+    return zotero_context.bibliography_entries[index]
+
+
 def resolve_citation_hyperlink_target(
     element: ET.Element,
     relationship_targets: dict[str, str],
@@ -1954,6 +1978,10 @@ def resolve_citation_hyperlink_target(
     anchor = element.get(f"{WORD_ATTR_PREFIX}anchor")
     if anchor:
         target = zotero_context.lookup(anchor=anchor)
+        if target is None:
+            target = infer_bibliography_target_from_anchor(anchor, zotero_context)
+            if target is not None:
+                zotero_context.by_anchor[anchor] = target
         if target is not None:
             return target
         if looks_like_citation_display_text(display_text):
@@ -1966,6 +1994,10 @@ def resolve_citation_hyperlink_target(
         target_anchor = extract_anchor_from_relationship_target(target)
         if target_anchor:
             resolved_target = zotero_context.lookup(anchor=target_anchor)
+            if resolved_target is None:
+                resolved_target = infer_bibliography_target_from_anchor(target_anchor, zotero_context)
+                if resolved_target is not None:
+                    zotero_context.by_anchor[target_anchor] = resolved_target
             if resolved_target is not None:
                 return resolved_target
             if looks_like_citation_display_text(display_text):
@@ -2145,10 +2177,44 @@ def trim_run_text_prefix(run: ET.Element, length: int) -> None:
 
 def strip_internal_hyperlink_styles(document_tree: ET.Element) -> bool:
     changed = False
+    for paragraph in document_tree.findall(".//w:p", XML_NAMESPACES):
+        if flatten_internal_hyperlinks_in_paragraph(paragraph):
+            changed = True
     for hyperlink in document_tree.findall(".//w:hyperlink", XML_NAMESPACES):
         for run_properties in hyperlink.findall(".//w:rPr", XML_NAMESPACES):
             if remove_run_style(run_properties):
                 changed = True
+    return changed
+
+
+def flatten_internal_hyperlinks_in_paragraph(paragraph: ET.Element) -> bool:
+    changed = False
+    for child in list(paragraph):
+        if child.tag != f"{WORD_ATTR_PREFIX}hyperlink":
+            continue
+        if child.get(f"{REL_ATTR_PREFIX}id"):
+            continue
+        insert_at = list(paragraph).index(child)
+        replacement_runs: list[ET.Element] = []
+        for run in child.findall("w:r", XML_NAMESPACES):
+            new_run = ET.Element(f"{WORD_ATTR_PREFIX}r")
+            run_properties = run.find("w:rPr", XML_NAMESPACES)
+            if run_properties is not None:
+                cloned_properties = clone_element(run_properties)
+                remove_run_style(cloned_properties)
+                new_run.append(cloned_properties)
+            for node in list(run):
+                if node.tag == f"{WORD_ATTR_PREFIX}rPr":
+                    continue
+                new_run.append(clone_element(node))
+            if len(new_run):
+                replacement_runs.append(new_run)
+        if not replacement_runs:
+            replacement_runs.append(build_field_run(text=get_element_text(child)))
+        paragraph.remove(child)
+        for offset, new_run in enumerate(replacement_runs):
+            paragraph.insert(insert_at + offset, new_run)
+        changed = True
     return changed
 
 
