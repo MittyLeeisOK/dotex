@@ -79,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     convert_parser.add_argument(
         "-z",
+        "-Z",
         "--zotero",
         dest="enable_zotero",
         action="store_true",

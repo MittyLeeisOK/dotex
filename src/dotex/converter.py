@@ -146,6 +146,7 @@ def convert_tex_to_docx(
             source_tex,
             source_text=source_text,
             length_context=document_layout_hints.length_context,
+            enable_zotero=enable_zotero,
         ),
         encoding="utf-8",
     )
@@ -188,6 +189,7 @@ def normalize_tex_for_pandoc(
     tex_path: Path,
     source_text: str | None = None,
     length_context: dict[str, float] | None = None,
+    enable_zotero: bool = False,
 ) -> str:
     if source_text is None:
         source_text = tex_path.read_text(encoding="utf-8")
@@ -198,12 +200,16 @@ def normalize_tex_for_pandoc(
     CURRENT_LABELS = labels
     CURRENT_LENGTH_CONTEXT = length_context or extract_length_context(source_text)
 
-    body = replace_command_two_args(body, "litref", render_litref_link)
+    body = replace_command_two_args(
+        body,
+        "litref",
+        render_litref_zotero_link if enable_zotero else render_litref_link,
+    )
     body = replace_command_one_arg(body, "tabref", lambda label: render_cross_reference(label, labels, "表格"))
     body = replace_command_one_arg(body, "figref", lambda label: render_cross_reference(label, labels, "图"))
     body = replace_command_one_arg(body, "detokenize", lambda value: value)
     body = replace_generic_refs(body, labels)
-    body = inline_bibliography_inputs(body, tex_path.parent)
+    body = inline_bibliography_inputs(body, tex_path.parent, enable_zotero=enable_zotero)
     body = strip_layout_only_commands(body)
     body = normalize_table_syntax(body)
     body = convert_figure_blocks(body)
@@ -771,7 +777,7 @@ def is_escaped(text: str, index: int) -> bool:
     return slash_count % 2 == 1
 
 
-def inline_bibliography_inputs(body: str, base_dir: Path) -> str:
+def inline_bibliography_inputs(body: str, base_dir: Path, enable_zotero: bool = False) -> str:
     pattern = re.compile(r"\\input\{([^}]+)\}")
 
     def repl(match: re.Match[str]) -> str:
@@ -779,12 +785,12 @@ def inline_bibliography_inputs(body: str, base_dir: Path) -> str:
         bib_path = (base_dir / relative_path).resolve()
         if not bib_path.exists():
             return match.group(0)
-        return render_bibliography_entries(bib_path)
+        return render_bibliography_entries(bib_path, enable_zotero=enable_zotero)
 
     return pattern.sub(repl, body)
 
 
-def render_bibliography_entries(bib_path: Path) -> str:
+def render_bibliography_entries(bib_path: Path, enable_zotero: bool = False) -> str:
     text = bib_path.read_text(encoding="utf-8")
     text = replace_command_one_arg(text, "nolinkurl", lambda value: f"\\url{{{value}}}")
     entries: list[str] = []
@@ -803,13 +809,23 @@ def render_bibliography_entries(bib_path: Path) -> str:
         except ValueError:
             index = start + len(token)
             continue
-        entries.append(render_anchor_div(make_bibliography_anchor_id(source_key), entry_text.strip()))
+        if enable_zotero:
+            entries.append(entry_text.strip())
+        else:
+            entries.append(render_anchor_div(make_bibliography_anchor_id(source_key), entry_text.strip()))
         index = cursor
     return "\n\n".join(entries)
 
 
 def render_litref_link(target: str, text: str) -> str:
     return f"[{text}](#{make_bibliography_anchor_id(target)})"
+
+
+def render_litref_zotero_link(target: str, text: str) -> str:
+    target_url = (target or "").strip()
+    if not target_url:
+        return text
+    return f"[{text}]({target_url})"
 
 
 def convert_figure_blocks(body: str) -> str:
