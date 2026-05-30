@@ -4265,9 +4265,16 @@ def normalize_preserved_zotero_field_runs(
         + json.dumps(canonical_payload, ensure_ascii=False, separators=(",", ":"))
         + " "
     )
-    if updated_instruction == instruction_text:
-        return
-    rewrite_instruction_node_texts(instruction_nodes, updated_instruction)
+    if updated_instruction != instruction_text:
+        rewrite_instruction_node_texts(instruction_nodes, updated_instruction)
+
+    for field_run in field_runs:
+        if field_run.tag != f"{WORD_ATTR_PREFIX}r":
+            continue
+        run_properties = field_run.find("w:rPr", XML_NAMESPACES)
+        normalized_properties = ensure_zotero_field_run_properties(run_properties)
+        if run_properties is None:
+            field_run.insert(0, normalized_properties)
 
 
 def rewrite_instruction_node_texts(
@@ -4491,8 +4498,12 @@ def first_run_properties(element: ET.Element) -> ET.Element | None:
 def ensure_zotero_field_run_properties(run_properties: ET.Element | None) -> ET.Element:
     if run_properties is None:
         run_properties = ET.Element(f"{WORD_ATTR_PREFIX}rPr")
+    remove_run_style(run_properties)
     for fonts in run_properties.findall("w:rFonts", XML_NAMESPACES):
         run_properties.remove(fonts)
+    for size_tag in ("sz", "szCs"):
+        for size_node in run_properties.findall(f"w:{size_tag}", XML_NAMESPACES):
+            run_properties.remove(size_node)
     color = run_properties.find("w:color", XML_NAMESPACES)
     if color is None:
         color = ET.SubElement(run_properties, f"{WORD_ATTR_PREFIX}color")

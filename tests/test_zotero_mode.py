@@ -477,6 +477,17 @@ class ZoteroModeTests(unittest.TestCase):
         self.assertNotIn('"dontUpdate"', instr_text)
         self.assertRegex(instr_text, r'"citationID":"[A-Za-z0-9]{8}"')
         self.assertNotIn('"citationID":"cite-1"', instr_text)
+        for run in paragraph.findall("./w:r", {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}):
+            fonts = run.find(f"{WORD_ATTR_PREFIX}rPr/{WORD_ATTR_PREFIX}rFonts")
+            self.assertIsNone(fonts)
+            size = run.find(f"{WORD_ATTR_PREFIX}rPr/{WORD_ATTR_PREFIX}sz")
+            size_cs = run.find(f"{WORD_ATTR_PREFIX}rPr/{WORD_ATTR_PREFIX}szCs")
+            self.assertIsNone(size)
+            self.assertIsNone(size_cs)
+            color = run.find(f"{WORD_ATTR_PREFIX}rPr/{WORD_ATTR_PREFIX}color")
+            self.assertIsNotNone(color)
+            assert color is not None
+            self.assertEqual(color.get(f"{WORD_ATTR_PREFIX}val"), "003399")
         self.assertEqual(context.citation_field_shells, {})
 
     def test_bookmarks_are_stripped(self) -> None:
@@ -819,6 +830,10 @@ class ZoteroModeTests(unittest.TestCase):
         for run in field_runs:
             fonts = run.find(f"{WORD_ATTR_PREFIX}rPr/{WORD_ATTR_PREFIX}rFonts")
             self.assertIsNone(fonts)
+            size = run.find(f"{WORD_ATTR_PREFIX}rPr/{WORD_ATTR_PREFIX}sz")
+            size_cs = run.find(f"{WORD_ATTR_PREFIX}rPr/{WORD_ATTR_PREFIX}szCs")
+            self.assertIsNone(size)
+            self.assertIsNone(size_cs)
             color = run.find(f"{WORD_ATTR_PREFIX}rPr/{WORD_ATTR_PREFIX}color")
             self.assertIsNotNone(color)
             assert color is not None
