@@ -41,8 +41,8 @@ ET.register_namespace("r", RELATIONSHIP_NAMESPACE)
 DEFAULT_PAPER_WIDTH_TWIPS = int(round(8.27 * 1440))
 CURRENT_LENGTH_CONTEXT: dict[str, float] = {}
 CURRENT_BIBLIOGRAPHY_ANCHORS: dict[str, str] = {}
-DEFAULT_INTERNAL_LINK_COLOR = "00B0F0"
 DEFAULT_ZOTERO_FIELD_COLOR = "003399"
+DEFAULT_INTERNAL_LINK_COLOR = DEFAULT_ZOTERO_FIELD_COLOR
 ZOTERO_CITATION_INSTRUCTION_PREFIX = " ADDIN ZOTERO_ITEM CSL_CITATION "
 ZOTERO_CITATION_SCHEMA_URL = "https://github.com/citation-style-language/schema/raw/master/csl-citation.json"
 ZOTERO_CITATION_ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
@@ -2717,11 +2717,11 @@ def rewrite_cross_reference_hyperlinks(
             display_text = get_element_text(child)
             if target is None:
                 diagnostics.add_warning(f"交叉引用 {display_text} 未能解析到对应题注，可能导致编辑审核不通过")
-                flatten_hyperlink_child(paragraph, child)
+                flatten_hyperlink_child(paragraph, child, reference_style=True)
                 changed = True
                 continue
             if not use_field_refs or target.bookmark_name is None:
-                flatten_hyperlink_child(paragraph, child)
+                flatten_hyperlink_child(paragraph, child, reference_style=True)
                 target.referenced = True
                 changed = True
                 continue
@@ -2794,7 +2794,7 @@ def build_reference_field_elements(
     bookmark_name: str,
     hyperlink_element: ET.Element,
 ) -> list[ET.Element]:
-    reference_rpr = first_run_properties(hyperlink_element)
+    reference_rpr = ensure_reference_run_properties(first_run_properties(hyperlink_element))
     instruction = f" REF {bookmark_name} \\h "
     return [
         build_field_run(fld_char_type="begin", rpr_template=reference_rpr),
@@ -3388,15 +3388,22 @@ def remove_disallowed_internal_hyperlinks(
     return changed
 
 
-def flatten_hyperlink_child(paragraph: ET.Element, hyperlink: ET.Element) -> None:
+def flatten_hyperlink_child(
+    paragraph: ET.Element,
+    hyperlink: ET.Element,
+    reference_style: bool = False,
+) -> None:
     insert_at = list(paragraph).index(hyperlink)
     replacement_runs: list[ET.Element] = []
     for run in hyperlink.findall("w:r", XML_NAMESPACES):
         new_run = ET.Element(f"{WORD_ATTR_PREFIX}r")
         run_properties = run.find("w:rPr", XML_NAMESPACES)
-        if run_properties is not None:
-            cloned_properties = clone_element(run_properties)
+        cloned_properties = clone_element(run_properties) if run_properties is not None else None
+        if reference_style:
+            cloned_properties = ensure_reference_run_properties(cloned_properties)
+        elif cloned_properties is not None:
             remove_run_style(cloned_properties)
+        if cloned_properties is not None:
             new_run.append(cloned_properties)
         for node in list(run):
             if node.tag == f"{WORD_ATTR_PREFIX}rPr":
@@ -3405,7 +3412,12 @@ def flatten_hyperlink_child(paragraph: ET.Element, hyperlink: ET.Element) -> Non
         if len(new_run):
             replacement_runs.append(new_run)
     if not replacement_runs:
-        replacement_runs.append(build_field_run(text=get_element_text(hyperlink)))
+        replacement_runs.append(
+            build_field_run(
+                text=get_element_text(hyperlink),
+                rpr_template=ensure_reference_run_properties(None) if reference_style else None,
+            )
+        )
     paragraph.remove(hyperlink)
     for offset, new_run in enumerate(replacement_runs):
         paragraph.insert(insert_at + offset, new_run)
@@ -3487,18 +3499,12 @@ def apply_plain_sky_blue_link_style(run: ET.Element) -> bool:
         run_properties = ET.Element(f"{WORD_ATTR_PREFIX}rPr")
         run.insert(0, run_properties)
         changed = True
-    if remove_run_style(run_properties):
+    ensure_reference_run_properties(run_properties)
+    for existing in list(run_properties.findall("w:u", XML_NAMESPACES)):
+        run_properties.remove(existing)
         changed = True
-    for element_name in ("color", "u"):
-        for existing in list(run_properties.findall(f"w:{element_name}", XML_NAMESPACES)):
-            run_properties.remove(existing)
-            changed = True
-    color = ET.Element(f"{WORD_ATTR_PREFIX}color")
-    color.set(f"{WORD_ATTR_PREFIX}val", DEFAULT_INTERNAL_LINK_COLOR)
-    run_properties.append(color)
-    underline = ET.Element(f"{WORD_ATTR_PREFIX}u")
+    underline = ET.SubElement(run_properties, f"{WORD_ATTR_PREFIX}u")
     underline.set(f"{WORD_ATTR_PREFIX}val", "none")
-    run_properties.append(underline)
     return True
 
 
@@ -4150,10 +4156,11 @@ def flatten_internal_hyperlinks_in_paragraph(
         for run in child.findall("w:r", XML_NAMESPACES):
             new_run = ET.Element(f"{WORD_ATTR_PREFIX}r")
             run_properties = run.find("w:rPr", XML_NAMESPACES)
-            if run_properties is not None:
-                cloned_properties = clone_element(run_properties)
-                remove_run_style(cloned_properties)
-                new_run.append(cloned_properties)
+            normalized_properties = ensure_reference_run_properties(
+                clone_element(run_properties) if run_properties is not None else None
+            )
+            if normalized_properties is not None:
+                new_run.append(normalized_properties)
             for node in list(run):
                 if node.tag == f"{WORD_ATTR_PREFIX}rPr":
                     continue
@@ -4161,7 +4168,12 @@ def flatten_internal_hyperlinks_in_paragraph(
             if len(new_run):
                 replacement_runs.append(new_run)
         if not replacement_runs:
-            replacement_runs.append(build_field_run(text=get_element_text(child)))
+            replacement_runs.append(
+                build_field_run(
+                    text=get_element_text(child),
+                    rpr_template=ensure_reference_run_properties(None),
+                )
+            )
         paragraph.remove(child)
         for offset, new_run in enumerate(replacement_runs):
             paragraph.insert(insert_at + offset, new_run)
@@ -4495,7 +4507,7 @@ def first_run_properties(element: ET.Element) -> ET.Element | None:
     return cloned_properties
 
 
-def ensure_zotero_field_run_properties(run_properties: ET.Element | None) -> ET.Element:
+def ensure_reference_run_properties(run_properties: ET.Element | None) -> ET.Element:
     if run_properties is None:
         run_properties = ET.Element(f"{WORD_ATTR_PREFIX}rPr")
     remove_run_style(run_properties)
@@ -4509,6 +4521,10 @@ def ensure_zotero_field_run_properties(run_properties: ET.Element | None) -> ET.
         color = ET.SubElement(run_properties, f"{WORD_ATTR_PREFIX}color")
     color.set(f"{WORD_ATTR_PREFIX}val", DEFAULT_ZOTERO_FIELD_COLOR)
     return run_properties
+
+
+def ensure_zotero_field_run_properties(run_properties: ET.Element | None) -> ET.Element:
+    return ensure_reference_run_properties(run_properties)
 
 
 def clone_element(element: ET.Element) -> ET.Element:

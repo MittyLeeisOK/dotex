@@ -135,6 +135,11 @@ Current display normalization target for every run inside a Zotero field:
 - remove `w:szCs`
 - force `w:color` to `003399`
 
+Visible-reference convergence rule:
+
+- TeX -> DOCX should not let citation styling diverge across direct Zotero fields, preserved Zotero shells, and citation hyperlink fallbacks
+- if a visible citation-like reference survives as a plain internal-link fallback, it should still converge to the same `003399` display class
+
 Interpretation:
 
 - source-shell fidelity is not the goal when the source display shell is already dirty

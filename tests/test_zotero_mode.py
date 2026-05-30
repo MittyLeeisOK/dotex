@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from dotex.converter import (
+    DEFAULT_ZOTERO_FIELD_COLOR,
     REL_ATTR_PREFIX,
     THREE_LINE_OUTER_BORDER_SIZE,
     WORD_ATTR_PREFIX,
@@ -523,6 +524,10 @@ class ZoteroModeTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(len(document.findall('.//w:hyperlink', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})), 0)
         self.assertEqual(len(document.findall('.//w:t', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})), 1)
+        color = document.find('.//w:r/w:rPr/w:color', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})
+        self.assertIsNotNone(color)
+        assert color is not None
+        self.assertEqual(color.get(f"{WORD_ATTR_PREFIX}val"), DEFAULT_ZOTERO_FIELD_COLOR)
 
     def test_default_mode_keeps_only_reference_bookmarks(self) -> None:
         document = ET.Element(f"{WORD_ATTR_PREFIX}document")
@@ -593,7 +598,7 @@ class ZoteroModeTests(unittest.TestCase):
         children = list(paragraph)
         self.assertEqual(children.index(bookmark_end), children.index(bookmark_start) + 1)
 
-    def test_default_internal_links_are_sky_blue_without_underline(self) -> None:
+    def test_default_internal_links_are_reference_blue_without_underline(self) -> None:
         document = ET.Element(f"{WORD_ATTR_PREFIX}document")
         body = ET.SubElement(document, f"{WORD_ATTR_PREFIX}body")
         paragraph = ET.SubElement(body, f"{WORD_ATTR_PREFIX}p")
@@ -615,7 +620,7 @@ class ZoteroModeTests(unittest.TestCase):
         self.assertIsNotNone(color)
         self.assertIsNotNone(underline)
         assert color is not None and underline is not None
-        self.assertEqual(color.get(f"{WORD_ATTR_PREFIX}val"), "00B0F0")
+        self.assertEqual(color.get(f"{WORD_ATTR_PREFIX}val"), DEFAULT_ZOTERO_FIELD_COLOR)
         self.assertEqual(underline.get(f"{WORD_ATTR_PREFIX}val"), "none")
 
     def test_default_internal_links_absorb_surrounding_parentheses(self) -> None:

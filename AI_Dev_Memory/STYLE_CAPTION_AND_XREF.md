@@ -56,6 +56,8 @@ Why:
 - prefer localized XML changes in `document.xml` and related parts
 - if font normalization adds `w:rFonts` into Zotero field runs, strip them back out inside the field block
 - keep Zotero field runs source-like, including blue run color
+- keep native `REF _Ref... \h` field runs in the same visible blue class as Zotero citations: `003399`
+- if a cross-reference cannot be rebuilt and must fall back to plain text, keep that fallback text in the same `003399` visible class instead of letting it revert to hyperlink-default styling or body text styling
 
 ## Figure/table layout guidance
 
