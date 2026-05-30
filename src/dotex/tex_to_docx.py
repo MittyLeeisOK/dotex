@@ -11,7 +11,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import pypandoc
 
-from dotex.zotero_resolver import (
+from dotex.resolve_zotero import (
     copied_zotero_database,
     normalize_doi,
     normalize_url,

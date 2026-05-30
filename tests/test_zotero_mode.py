@@ -3,7 +3,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from dotex.converter import (
+from dotex.tex_to_docx import (
     DEFAULT_ZOTERO_FIELD_COLOR,
     REL_ATTR_PREFIX,
     THREE_LINE_OUTER_BORDER_SIZE,
@@ -31,7 +31,7 @@ from dotex.converter import (
     strip_all_bookmarks,
     strip_internal_hyperlink_styles,
 )
-from dotex.zotero_resolver import build_zotero_item_uri, parse_bibliography_entries
+from dotex.resolve_zotero import build_zotero_item_uri, parse_bibliography_entries
 
 
 def make_context() -> ZoteroDocxContext:

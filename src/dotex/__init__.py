@@ -1,4 +1,4 @@
-"""Project package for TeX to DOCX tooling."""
+"""Project package for bidirectional DOCX and TeX tooling."""
 
 __all__ = ["__version__"]
 

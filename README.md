@@ -158,7 +158,9 @@ Extracts template information from a DOCX reference file.
 dotex compare-roundtrip original.docx source.tex generated.docx --output report.md
 ```
 
-Compares an original DOCX, the source TeX, and the generated DOCX.
+Builds a diagnostic report that compares an original DOCX, the source TeX, and the generated DOCX.
+
+This is mainly a QA and debugging command, not part of the normal author workflow.
 
 ### `resolve-zotero`
 

@@ -10,16 +10,16 @@ from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from dotex.converter import (
+from dotex.tex_to_docx import (
     DEFAULT_ZOTERO_DATABASE,
     convert_tex_to_docx,
     derive_import_url,
     infer_bibliography_path,
 )
 from dotex.docx_to_tex import convert_docx_to_tex
-from dotex.docx_inspector import TemplateManifest, inspect_template
-from dotex.roundtrip_compare import build_roundtrip_comparison, render_roundtrip_report
-from dotex.zotero_resolver import copied_zotero_database, resolve_bibliography_against_zotero
+from dotex.inspect_docx import TemplateManifest, inspect_template
+from dotex.compare_roundtrip import build_roundtrip_comparison, render_roundtrip_report
+from dotex.resolve_zotero import copied_zotero_database, resolve_bibliography_against_zotero
 
 
 DEFAULT_FORMAT_SCORE_THRESHOLD = 90.0
@@ -165,7 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     compare_parser = subparsers.add_parser(
         "compare-roundtrip",
-        help="Compare an original DOCX, source TeX, and generated DOCX across tables, figures, and formulas.",
+        help="Diagnostic report tool for checking roundtrip fidelity across tables, figures, and formulas.",
     )
     compare_parser.add_argument("source_docx", type=Path, help="Path to the original DOCX manuscript.")
     compare_parser.add_argument("source_tex", type=Path, help="Path to the source TeX manuscript.")

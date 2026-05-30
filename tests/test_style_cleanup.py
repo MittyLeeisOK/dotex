@@ -1,7 +1,7 @@
 import unittest
 import xml.etree.ElementTree as ET
 
-from dotex.converter import (
+from dotex.tex_to_docx import (
     WORD_ATTR_PREFIX,
     TemplateDocxHints,
     WESTERN_FONT_FAMILY,

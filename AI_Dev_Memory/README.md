@@ -35,3 +35,10 @@ Current stable target:
 - DOCX -> TeX -> DOCX and direct TeX -> DOCX should converge to the same canonical Zotero citation payload shape.
 - The document should preserve editable Zotero fields, Word-native REF/SEQ caption references, hidden `_Ref...` bookmarks, and package-level Zotero metadata.
 - Plain output is opt-in via downgrade flags only.
+
+Current module naming convention:
+
+- directional conversion modules should use explicit direction names: `docx_to_tex.py`, `tex_to_docx.py`
+- support utilities should prefer verb-first names: `inspect_docx.py`, `compare_roundtrip.py`, `resolve_zotero.py`
+- avoid generic file names like `converter.py` when the module only implements one direction of the pipeline
+- `*.egg-info/` under `src/` is generated packaging metadata, not source code, and should not be committed

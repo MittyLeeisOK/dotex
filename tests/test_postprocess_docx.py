@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from dotex.converter import (
+from dotex.tex_to_docx import (
   CitationTarget,
     WORD_ATTR_PREFIX,
     DocumentLayoutHints,

@@ -1,7 +1,7 @@
 import unittest
 import xml.etree.ElementTree as ET
 
-from dotex.converter import (
+from dotex.tex_to_docx import (
     DEFAULT_ZOTERO_FIELD_COLOR,
     WORD_ATTR_PREFIX,
     ConversionDiagnostics,

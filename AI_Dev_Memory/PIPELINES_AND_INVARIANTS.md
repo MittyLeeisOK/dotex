@@ -53,7 +53,7 @@ Key implementation idea:
 
 Primary file:
 
-- `src/dotex/converter.py`
+- `src/dotex/tex_to_docx.py`
 
 Critical responsibilities:
 
