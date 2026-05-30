@@ -63,6 +63,14 @@ Why:
 - missing source labels are a content problem, not always a converter bug
 - if longtable interacts badly with figure placement, fix figure placement at the TeX-prep stage rather than patching Word XML blindly
 
+## Real manuscript cross-reference lesson
+
+- figure references can fail even when the label text still exists in TeX
+- one real failure pattern was `\label{...}` placed immediately before `\textbf{\begin{figure} ...}`
+- if label injection only recognizes a bare `\begin{figure}`, the formatting wrapper blocks the move and the figure loses a stable `_Ref...` target
+- unwrap formatting wrappers around block environments before injecting preceding labels into figures
+- current rich-mode REF rebuilding still targets caption/bookmark references, not arbitrary section-number references such as `4.2 实验设计`
+
 ## Rich vs plain behavior
 
 Rich mode:

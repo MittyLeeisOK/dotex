@@ -112,6 +112,34 @@ Therefore:
 - a preserve-shell pipeline can faithfully preserve bad shells as well as good ones
 - the tool should prefer canonical repair over naive fidelity when a shell clearly looks synthetic or stale
 
+## Display-layer contamination in preserved shells
+
+Payload fidelity is not enough.
+
+Real manuscript finding:
+
+- many source citation shells were payload-valid but carried explicit `w:sz=21` and `w:szCs=21`
+- many source citation runs had no `w:color`
+- roundtrip output therefore inherited smaller black citations even though the Zotero payload itself was correct and editable
+
+Stable rule:
+
+- normalize preserved-shell display properties as well as payload internals
+- keep direct-builder fields and preserved-shell fields in the same display compatibility class
+
+Current display normalization target for every run inside a Zotero field:
+
+- remove `w:rStyle`
+- remove `w:rFonts`
+- remove `w:sz`
+- remove `w:szCs`
+- force `w:color` to `003399`
+
+Interpretation:
+
+- source-shell fidelity is not the goal when the source display shell is already dirty
+- canonical display cleanup must stay scoped to Zotero field runs only, not body text around them
+
 ## What not to do
 
 - do not inject `w:updateFields`

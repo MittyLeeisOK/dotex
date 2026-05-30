@@ -32,6 +32,18 @@ Check in this order:
 
 If field-level parity holds, move up to package-level checks.
 
+### Citation looks smaller or loses blue color
+
+Treat this as a display-shell problem first, not a payload problem.
+
+Check in this order:
+
+1. extract one exact `ADDIN ZOTERO_ITEM CSL_CITATION` block from source and generated `word/document.xml`
+2. compare the visible result runs, not just the JSON payload in `instrText`
+3. inspect `w:color`, `w:sz`, `w:szCs`, `w:rFonts`, and `w:rStyle` on runs inside the field block
+4. if the source already carries explicit small sizes or missing color, do not preserve those display properties blindly
+5. confirm direct-builder fields and preserved-shell fields land in the same normalized display shape
+
 ### Caption / REF / SEQ issue
 
 Check in this order:
@@ -49,6 +61,13 @@ Check in this order:
 2. relationships and content types
 3. malformed field cleanup or hyperlink cleanup
 4. recently added package parts
+
+## Real manuscript lessons worth reusing
+
+- if the main title disappears into body text after roundtrip, inspect whether DOCX -> TeX downgraded the title into the first body paragraph; recover it with paragraph-style hints instead of editing `styles.xml`
+- treat `\hl{...}` as a content-bearing wrapper; dropping it deletes user text rather than merely removing formatting
+- if a complex longtable becomes chaotic in DOCX, inspect the TeX -> markdown downgrade before touching DOCX postprocess; `%` inside `\multicolumn{...}{%` is layout syntax, not cell content
+- do not naively expand every `\multicolumn` into filler columns when targeting markdown tables; that creates phantom blank columns and shifts real cells
 
 ## Commands worth reusing
 
