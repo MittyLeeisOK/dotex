@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sqlite3
+import tempfile
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -20,6 +24,7 @@ class ZoteroItem:
     item_id: int
     item_key: str
     item_type: str
+    uri: str | None
     fields: dict[str, str]
     creators: list[dict[str, str]]
 
@@ -64,11 +69,13 @@ class ResolutionRecord:
     parsed_title: str | None
     matched: bool
     matched_by: str | None
+    zotero_item_id: int | None
     zotero_item_key: str | None
     zotero_item_type: str | None
     zotero_title: str | None
     zotero_url: str | None
     zotero_doi: str | None
+    zotero_uri: str | None
 
 
 @dataclass
@@ -140,11 +147,13 @@ def resolve_bibliography_against_zotero(
                 parsed_title=entry.parsed_title,
                 matched=matched_item is not None,
                 matched_by=matched_by,
+                zotero_item_id=matched_item.item_id if matched_item else None,
                 zotero_item_key=matched_item.item_key if matched_item else None,
                 zotero_item_type=matched_item.item_type if matched_item else None,
                 zotero_title=matched_item.fields.get("title") if matched_item else None,
                 zotero_url=matched_item.fields.get("url") if matched_item else None,
                 zotero_doi=matched_item.fields.get("DOI") if matched_item else None,
+                zotero_uri=matched_item.uri if matched_item else None,
             )
         )
 
@@ -187,13 +196,98 @@ def parse_bibliography_entries(bibliography_path: Path) -> list[BibliographyEntr
             )
         )
         index = cursor
+    if entries:
+        return entries
+
+    refs_display = load_refs_display_map(bibliography_path)
+    for key, entry_text in parse_bibtex_entry_blocks(text):
+        title = clean_bibtex_field_text(extract_bibtex_field(entry_text, "title") or "")
+        doi = clean_bibtex_field_text(extract_bibtex_field(entry_text, "doi") or "")
+        url = clean_bibtex_field_text(extract_bibtex_field(entry_text, "url") or "")
+        author = clean_bibtex_field_text(extract_bibtex_field(entry_text, "author") or "")
+        year = clean_bibtex_field_text(extract_bibtex_field(entry_text, "year") or "")
+        source_key = doi or url or key
+        formatted_reference = refs_display.get(key) or synthesize_bibtex_display(author, year, title, key)
+        entries.append(
+            BibliographyEntry(
+                source_key=source_key.strip(),
+                formatted_reference=formatted_reference.strip(),
+                parsed_title=title or None,
+            )
+        )
     return entries
+
+
+def load_refs_display_map(bibliography_path: Path) -> dict[str, str]:
+    refs_display_path = bibliography_path.with_name("refs_display.json")
+    if not refs_display_path.exists():
+        return {}
+    try:
+        payload = json.loads(refs_display_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {str(key): str(value) for key, value in payload.items()}
+
+
+def parse_bibtex_entry_blocks(text: str) -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = []
+    for match in re.finditer(r"@(\w+)\{([^,\s{}'\"]+),", text):
+        key = match.group(2).strip()
+        entry_start = match.end()
+        next_entry = text.find("@", entry_start)
+        entry_text = text[entry_start : next_entry if next_entry != -1 else len(text)]
+        entries.append((key, entry_text))
+    return entries
+
+
+def extract_bibtex_field(entry_text: str, field_name: str) -> str | None:
+    match = re.search(rf"\b{re.escape(field_name)}\s*=\s*", entry_text, re.IGNORECASE)
+    if match is None:
+        return None
+    cursor = skip_whitespace(entry_text, match.end())
+    if cursor >= len(entry_text):
+        return None
+    if entry_text[cursor] == "{":
+        value, _ = read_braced(entry_text, cursor)
+        return value
+    if entry_text[cursor] == '"':
+        cursor += 1
+        value_start = cursor
+        while cursor < len(entry_text):
+            if entry_text[cursor] == '"' and not is_escaped(entry_text, cursor):
+                return entry_text[value_start:cursor]
+            cursor += 1
+        return entry_text[value_start:]
+    value_start = cursor
+    while cursor < len(entry_text) and entry_text[cursor] not in ",\n\r":
+        cursor += 1
+    return entry_text[value_start:cursor]
+
+
+def clean_bibtex_field_text(value: str) -> str:
+    current = value.strip()
+    current = current.replace("\n", " ")
+    current = current.replace("\r", " ")
+    current = re.sub(r"\\&", "&", current)
+    current = re.sub(r"[{}]", "", current)
+    current = re.sub(r"\s+", " ", current)
+    return current.strip()
+
+
+def synthesize_bibtex_display(author: str, year: str, title: str, key: str) -> str:
+    normalized_author = author.replace(" and ", "; ").strip()
+    if normalized_author and year:
+        return f"{normalized_author} {year}".strip()
+    if title and year:
+        return f"{title} {year}".strip()
+    return key
 
 
 def load_zotero_items(zotero_database: Path) -> list[ZoteroItem]:
     connection = sqlite3.connect(f"file:{zotero_database.expanduser()}?mode=ro", uri=True)
     try:
         cursor = connection.cursor()
+        user_id = load_zotero_user_id(cursor)
         field_rows = cursor.execute(
             """
             select items.itemID, items.key, itemTypes.typeName, fields.fieldName, itemDataValues.value
@@ -224,7 +318,14 @@ def load_zotero_items(zotero_database: Path) -> list[ZoteroItem]:
     for item_id, item_key, item_type, field_name, field_value in field_rows:
         item = items.setdefault(
             item_id,
-            ZoteroItem(item_id=item_id, item_key=item_key, item_type=item_type, fields={}, creators=[]),
+            ZoteroItem(
+                item_id=item_id,
+                item_key=item_key,
+                item_type=item_type,
+                uri=build_zotero_item_uri(item_key, user_id),
+                fields={},
+                creators=[],
+            ),
         )
         item.fields[field_name] = field_value
 
@@ -238,6 +339,40 @@ def load_zotero_items(zotero_database: Path) -> list[ZoteroItem]:
             item.creators.append({"family": last_name, "given": first_name})
 
     return list(items.values())
+
+
+def load_zotero_user_id(cursor: sqlite3.Cursor) -> str | None:
+    row = cursor.execute(
+        """
+        select value from settings
+        where setting='account' and key='userID'
+        limit 1
+        """
+    ).fetchone()
+    if row is None or row[0] in {None, ""}:
+        return None
+    return str(row[0])
+
+
+def build_zotero_item_uri(item_key: str, user_id: str | None) -> str | None:
+    if user_id:
+        return f"http://zotero.org/users/{user_id}/items/{item_key}"
+    if item_key:
+        return f"http://zotero.org/users/local/items/{item_key}"
+    return None
+
+
+@contextmanager
+def copied_zotero_database(zotero_database: Path) -> Iterator[Path]:
+    source = zotero_database.expanduser()
+    with tempfile.TemporaryDirectory(prefix="dotex-zotero-") as temp_dir:
+        target = Path(temp_dir) / source.name
+        shutil.copy2(source, target)
+        for suffix in ("-wal", "-shm"):
+            companion = source.with_name(source.name + suffix)
+            if companion.exists():
+                shutil.copy2(companion, target.with_name(target.name + suffix))
+        yield target
 
 
 def map_zotero_type_to_csl(item_type: str) -> str:

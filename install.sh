@@ -350,15 +350,17 @@ print_first_install_notes() {
 常用命令：
   dotex --help
   dotex inspect-template /path/to/reference-template.docx --output artifacts/template.json
-  dotex convert-docx /path/to/manuscript.tex -t /path/to/reference-template.docx -o /path/to/manuscript.docx
+  dotex convert-docx /path/to/manuscript.tex -o /path/to/manuscript.docx
+  dotex convert-docx /path/to/manuscript.tex -o /path/to/manuscript.docx -z
   dotex convert-tex /path/to/manuscript.docx --output /path/to/manuscript.tex
-  dotex compare-roundtrip /path/to/original.docx /path/to/source.tex /path/to/generated.docx
+  dotex compare-roundtrip /path/to/original.docx /path/to/source.tex /path/to/generated.docx --output /path/to/report.md
 
 注意事项：
   1. 运行时需要 Python 3.9+。
   2. 运行 convert-docx 和 convert-tex 需要系统中可用的 pandoc；安装脚本会在首次安装时自动尝试安装它，失败时再手动补装。
-  3. Zotero 模式默认读取 ~/Zotero/zotero.sqlite；如果本地库不完整，工具仍会输出 Zotero field，并另外写出 xlsx 检查表供补齐条目。
-  4. 工具会在 artifacts/ 和生成的 DOCX 附近写出中间产物与检查文件，里面可能包含你的稿件内容，不要把运行结果直接提交到公开仓库。
+  3. convert-docx 默认输出与源 tex 同名的 .docx；只有显式传 -o/--output 时才会改到别的路径。
+  4. Zotero 模式默认读取 ~/Zotero/zotero.sqlite；如果本地库不完整，工具仍会输出 Zotero field，并在生成的 DOCX 旁额外写出 xlsx 检查表供补齐条目。
+  5. 默认运行不会保留调试中间产物；如果你自己另行保存运行结果，注意其中可能包含稿件内容，不要直接提交到公开仓库。
 EOF
 
   if [ "${INSTALL_SCOPE}" = user ] && [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then

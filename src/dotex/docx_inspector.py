@@ -13,6 +13,7 @@ NS = {
     "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
 }
+PACKAGE_RELATIONSHIP_NAMESPACE = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 W = NS["w"]
 
@@ -109,6 +110,7 @@ class WordTemplateInspector:
                 "table_style_usage": table_style_usage,
                 "caption_samples": captions,
                 "sections": section_properties,
+                "link_artifacts": self._collect_link_artifacts(),
             },
             theme=self._collect_theme_fonts(),
             doc_defaults=self._collect_doc_defaults(),
@@ -384,6 +386,92 @@ class WordTemplateInspector:
             "citation_field_count": citation_field_count,
             "bibliography_field_count": bibliography_field_count,
         }
+
+    def _collect_link_artifacts(self) -> dict:
+        bookmark_start_count = 0
+        bookmark_end_count = 0
+        non_hidden_bookmark_count = 0
+        expanded_bookmark_count = 0
+        hyperlink_count = 0
+        internal_hyperlink_count = 0
+        document_relationships = self._document_relationship_targets()
+
+        for name in sorted(self.zf.namelist()):
+            if not name.startswith("word/") or not name.endswith(".xml"):
+                continue
+            root = read_xml(self.zf, name)
+            if root is None:
+                continue
+            bookmark_ends = {
+                get_attr(bookmark, W, "id"): bookmark
+                for bookmark in root.findall(".//w:bookmarkEnd", NS)
+                if get_attr(bookmark, W, "id") is not None
+            }
+            bookmark_starts = root.findall(".//w:bookmarkStart", NS)
+            bookmark_start_count += len(bookmark_starts)
+            bookmark_end_count += len(bookmark_ends)
+            for bookmark in bookmark_starts:
+                name = get_attr(bookmark, W, "name") or ""
+                if not name.startswith("_"):
+                    non_hidden_bookmark_count += 1
+                bookmark_end = bookmark_ends.get(get_attr(bookmark, W, "id") or "")
+                if bookmark_end is not None and not is_collapsed_bookmark(root, bookmark, bookmark_end):
+                    expanded_bookmark_count += 1
+            for hyperlink in root.findall(".//w:hyperlink", NS):
+                hyperlink_count += 1
+                anchor = get_attr(hyperlink, W, "anchor")
+                rel_id = get_attr(hyperlink, NS["r"], "id")
+                relationship_target = document_relationships.get(rel_id or "")
+                if anchor or is_internal_relationship_target(relationship_target):
+                    internal_hyperlink_count += 1
+
+        return {
+            "bookmark_start_count": bookmark_start_count,
+            "bookmark_end_count": bookmark_end_count,
+            "non_hidden_bookmark_count": non_hidden_bookmark_count,
+            "expanded_bookmark_count": expanded_bookmark_count,
+            "hyperlink_count": hyperlink_count,
+            "internal_hyperlink_count": internal_hyperlink_count,
+        }
+
+    def _document_relationship_targets(self) -> dict[str, str]:
+        if "word/_rels/document.xml.rels" not in self.zf.namelist():
+            return {}
+        root = ET.fromstring(self.zf.read("word/_rels/document.xml.rels"))
+        relationships: dict[str, str] = {}
+        for relationship in root.findall(f"{{{PACKAGE_RELATIONSHIP_NAMESPACE}}}Relationship"):
+            rel_id = relationship.get("Id")
+            target = relationship.get("Target")
+            if rel_id and target:
+                relationships[rel_id] = target
+        return relationships
+
+
+def is_internal_relationship_target(target: str | None) -> bool:
+    if not target:
+        return False
+    stripped = target.strip()
+    if stripped.startswith("#"):
+        return True
+    if any(marker in stripped for marker in (":", "/", "\\")):
+        return False
+    return True
+
+
+def is_collapsed_bookmark(root: ET.Element, start: ET.Element, end: ET.Element) -> bool:
+    parent = find_direct_parent(root, start)
+    if parent is None or parent is not find_direct_parent(root, end):
+        return False
+    children = list(parent)
+    return children.index(end) == children.index(start) + 1
+
+
+def find_direct_parent(root: ET.Element, target: ET.Element) -> ET.Element | None:
+    for parent in root.iter():
+        for child in list(parent):
+            if child is target:
+                return parent
+    return None
 
 
 def inspect_template(docx_path: Path) -> TemplateManifest:

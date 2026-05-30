@@ -1,11 +1,11 @@
 # Roundtrip Workflow
 
-This workflow shows the intended release-level usage of dotex.
+This workflow shows a standard dotex roundtrip path.
 
 ## 1. Install The Toolkit
 
 ```bash
-python3 -m pip install -e .
+curl -fsSL https://raw.githubusercontent.com/MittyLeeisOK/dotex/main/install.sh | bash -s -- --install --yes
 ```
 
 ## 2. Convert DOCX To TeX
@@ -13,22 +13,26 @@ python3 -m pip install -e .
 ```bash
 dotex convert-tex \
   /path/to/original.docx \
-  --output /path/to/original_from_docx.tex
+  --output /path/to/original_from_docx
 ```
 
 Outputs:
 
-- `/path/to/original_from_docx.tex`
-- `/path/to/original_from_docx_media/`
+- `/path/to/original_from_docx/original_from_docx.tex`
+- `/path/to/original_from_docx/bibliography_links.tex` when the DOCX ends with a references section
+- `/path/to/original_from_docx/original_from_docx_media/`
+- `/path/to/original_from_docx/.latexmkrc`
+- `/path/to/original_from_docx/Makefile`
 
 ## 3. Convert TeX Back To DOCX
 
 ```bash
 dotex convert-docx \
   /path/to/source.tex \
-  -t /path/to/reference-template.docx \
   -o /path/to/source.docx
 ```
+
+Use `-t /path/to/reference-template.docx` only when you want to override the bundled default template.
 
 Possible companion output when Zotero mode is enabled:
 

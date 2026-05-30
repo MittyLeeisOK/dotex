@@ -4,12 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dotex"
-version = "0.3.0"
-description = "Reusable high-fidelity TeX to DOCX toolkit for manuscript workflows"
+version = "1.0.0"
+description = "Roundtrip DOCX and TeX converter for manuscript workflows with Zotero and Word cross-references"
+readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
 	"pypandoc>=1.12",
 ]
+
+[project.urls]
+Homepage = "https://github.com/MittyLeeisOK/dotex"
+Repository = "https://github.com/MittyLeeisOK/dotex"
 
 [project.scripts]
 dotex = "dotex.cli:main"

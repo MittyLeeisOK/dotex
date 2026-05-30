@@ -1,6 +1,15 @@
+.DS_Store
+.venv/
+
 artifacts/*
 !artifacts/.gitkeep
 reports/*
 !reports/.gitkeep
+
+*.egg-info/
+build/
+dist/
+
 __pycache__/
 *.pyc
+.pytest_cache/
