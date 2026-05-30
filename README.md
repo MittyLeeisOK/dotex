@@ -64,30 +64,50 @@ Do not use `python -m dotex.cli` as the public entrypoint.
 
 ## Quick start
 
+Most users only need these two commands.
+
 ### 1. Convert DOCX to a TeX project
 
 ```bash
-dotex convert-tex /path/to/manuscript.docx --output /path/to/output_project
+dotex convert-tex /path/to/manuscript.docx
 ```
 
-This writes a project directory that contains the TeX file, extracted media, and roundtrip support files.
+By default this creates a project directory named after the DOCX stem.
+
+Example:
+
+- `dotex convert-tex manuscript.docx`
+- writes `manuscript/manuscript.tex`
+
+The project directory contains the TeX file, extracted media, and roundtrip support files.
 
 ### 2. Convert TeX to DOCX
 
 ```bash
-dotex convert-docx /path/to/manuscript.tex -o /path/to/output.docx
+dotex convert-docx /path/to/manuscript/manuscript.tex
 ```
 
-By default, dotex restores editable Zotero fields and native Word caption references.
+By default this writes a DOCX next to the input TeX.
+
+Example:
+
+- `dotex convert-docx manuscript/manuscript.tex`
+- writes `manuscript/manuscript.docx`
+
+dotex restores editable Zotero fields and native Word caption references by default.
 
 ### 3. Do a full roundtrip
 
 ```bash
-dotex convert-tex /path/to/manuscript.docx --output /path/to/output_project
-dotex convert-docx /path/to/output_project/manuscript.tex -t /path/to/manuscript.docx -o /path/to/roundtrip.docx
+dotex convert-tex manuscript.docx
+dotex convert-docx manuscript/manuscript.tex
 ```
 
-This is the recommended workflow when you want the Word output to stay close to the original DOCX structure.
+This is the normal roundtrip workflow.
+
+You usually do not need `--template`.
+
+If the TeX project came from `convert-tex`, dotex will try to reuse a nearby reference DOCX automatically. Use `--template` only when you want to override that detection manually.
 
 ## The two downgrade switches
 
@@ -177,6 +197,8 @@ These files make DOCX to TeX to DOCX roundtrip work without rebuilding everythin
 
 ## How templates are chosen
 
+Most users do not need to pass `--template`.
+
 For `convert-docx`, dotex looks for a reference DOCX in this order:
 
 1. `--template`
@@ -185,6 +207,8 @@ For `convert-docx`, dotex looks for a reference DOCX in this order:
 4. the built-in default template
 
 This lets a roundtrip project reuse the original Word styling automatically when possible.
+
+If none of these exist, dotex falls back to the built-in default template.
 
 ## Validation output
 
