@@ -327,6 +327,25 @@ def inject_preceding_labels_into_environments(body: str, env_names: list[str]) -
     return body
 
 
+def unwrap_formatting_wrapped_environments(body: str, env_names: list[str]) -> str:
+    """Strip inline formatting wrappers like \textbf{...} around block environments.
+
+    Pandoc sometimes wraps a whole figure environment in inline formatting commands.
+    When that happens, labels emitted immediately before the wrapper no longer sit
+    directly in front of \begin{figure}, so later label injection misses them.
+    """
+    wrappers = ("textbf", "emph")
+    for env_name in env_names:
+        for wrapper in wrappers:
+            body = re.sub(
+                r"\\" + wrapper + r"\{\s*(\\begin\{" + re.escape(env_name) + r"\}(?:\[[^\]]*\])?.*?\\end\{" + re.escape(env_name) + r"\})\s*\}",
+                lambda m: m.group(1),
+                body,
+                flags=re.S,
+            )
+    return body
+
+
 def convert_hyperref_commands(body: str) -> str:
     """Convert \\hyperref[label]{text} to cross-reference anchor links.
 
@@ -399,6 +418,7 @@ def normalize_tex_for_pandoc(
         body = replace_command_one_arg(body, "citet", _expand_textcite)
     body = inline_bibliography_inputs(body, tex_path.parent)
     body = strip_layout_only_commands(body)
+    body = unwrap_formatting_wrapped_environments(body, ["figure"])
     body = inject_preceding_labels_into_environments(body, ["figure"])
     body = normalize_table_syntax(body)
     body = convert_figure_blocks(body)
@@ -1402,6 +1422,8 @@ def parse_table_rows(block: str, env_name: str) -> list[list[str]]:
         for cell in cells:
             expanded_cells.extend(expand_multicolumn_cell(cell.strip()))
         cleaned_cells = [cleanup_table_cell(cell) for cell in expanded_cells]
+        while cleaned_cells and not cleaned_cells[-1]:
+            cleaned_cells.pop()
         if any(cleaned_cells):
             rows.append(cleaned_cells)
 
@@ -1476,15 +1498,12 @@ def expand_multicolumn_cell(cell: str) -> list[str]:
         value, _ = read_braced(stripped, skip_whitespace(stripped, cursor))
     except ValueError:
         return [stripped]
-    try:
-        count = max(int(count_text), 1)
-    except ValueError:
-        count = 1
-    return [value.strip()] + [""] * (count - 1)
+    return [value.strip()]
 
 
 def cleanup_table_cell(cell: str) -> str:
     # Strip minipage wrappers and alignment commands before inline TeX processing
+    cell = re.sub(r"(?m)^\s*%\s*", "", cell)
     cell = re.sub(r"\\begin\{minipage\}(?:\[[^\]]*\])?\{[^}]*\}", "", cell)
     cell = re.sub(r"\\end\{minipage\}", "", cell)
     cell = re.sub(r"\\(raggedright|raggedleft|centering|arraybackslash)\b\s*", "", cell)
@@ -1655,6 +1674,11 @@ def convert_inline_tex_to_markdown(text: str) -> str:
             "textsuperscript",
             lambda value: f"<sup>{convert_inline_tex_to_markdown(value)}</sup>",
         )
+        current = replace_command_one_arg(
+            current,
+            "hl",
+            lambda value: convert_inline_tex_to_markdown(value),
+        )
 
     replacements = {
         "``": "\u201c",
@@ -1686,6 +1710,7 @@ def convert_inline_tex_to_plain(text: str) -> str:
         current = replace_command_one_arg(current, "emph", lambda value: convert_inline_tex_to_plain(value))
         current = replace_command_one_arg(current, "textbf", lambda value: convert_inline_tex_to_plain(value))
         current = replace_command_one_arg(current, "textsuperscript", lambda value: convert_inline_tex_to_plain(value))
+        current = replace_command_one_arg(current, "hl", lambda value: convert_inline_tex_to_plain(value))
     replacements = {
         "\\%": "%",
         "\\_": "_",
@@ -3134,6 +3159,43 @@ def apply_body_paragraph_hints(
             continue
         set_paragraph_style_id(paragraph, hints.normal_style_id)
         changed = True
+
+    if hints.title_style_id and not any(get_paragraph_style_id(paragraph) == hints.title_style_id for paragraph in paragraphs):
+        heading_style_ids = {
+            style_id
+            for style_id in (hints.heading_1_style_id, hints.heading_2_style_id, hints.heading_3_style_id)
+            if style_id
+        }
+        first_heading_index = next(
+            (
+                index
+                for index, paragraph in enumerate(paragraphs)
+                if (
+                    get_paragraph_style_id(paragraph) in heading_style_ids
+                    or get_paragraph_text(paragraph).strip() in {"摘要", "Abstract"}
+                )
+            ),
+            None,
+        )
+        if first_heading_index is not None:
+            for paragraph in reversed(paragraphs[:first_heading_index]):
+                text = get_paragraph_text(paragraph).strip()
+                if not text:
+                    continue
+                if len(text) < 8 or len(text) > 120:
+                    continue
+                if text in {"总编室意见", bibliography_heading}:
+                    continue
+                if re.match(r"^[0-9０-９]+[、.．)]", text):
+                    continue
+                if text.endswith(("：", ":", "。", "！", "!", "？", "?", "；", ";")):
+                    continue
+                if get_paragraph_style_id(paragraph) != hints.title_style_id:
+                    set_paragraph_style_id(paragraph, hints.title_style_id)
+                    changed = True
+                if set_paragraph_alignment(paragraph, "center"):
+                    changed = True
+                break
     return changed
 
 
