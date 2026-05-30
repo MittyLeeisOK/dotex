@@ -105,9 +105,9 @@ dotex convert-docx manuscript/manuscript.tex
 
 This is the normal roundtrip workflow.
 
-You usually do not need `--template`.
+By default, `convert-docx` uses dotex's built-in template.
 
-If the TeX project came from `convert-tex`, dotex will try to reuse a nearby reference DOCX automatically. Use `--template` only when you want to override that detection manually.
+Use `--template` only when you explicitly want to supply an external DOCX template.
 
 ## The two downgrade switches
 
@@ -201,16 +201,12 @@ These files make DOCX to TeX to DOCX roundtrip work without rebuilding everythin
 
 Most users do not need to pass `--template`.
 
-For `convert-docx`, dotex looks for a reference DOCX in this order:
+For `convert-docx`, template selection is intentionally simple:
 
 1. `--template`
-2. a sibling DOCX with the same stem as the input TeX
-3. a parent-level DOCX whose name matches the TeX folder name
-4. the built-in default template
+2. the built-in default template
 
-This lets a roundtrip project reuse the original Word styling automatically when possible.
-
-If none of these exist, dotex falls back to the built-in default template.
+dotex does not auto-depend on a nearby source DOCX or reference DOCX.
 
 ## Validation output
 

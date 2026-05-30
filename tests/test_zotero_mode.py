@@ -1,14 +1,16 @@
+import re
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from dotex.tex_to_docx import (
     DEFAULT_ZOTERO_FIELD_COLOR,
     REL_ATTR_PREFIX,
     THREE_LINE_OUTER_BORDER_SIZE,
     WORD_ATTR_PREFIX,
-    CitationFieldShell,
     CitationTarget,
     DocumentLayoutHints,
     ZoteroDocxContext,
@@ -63,7 +65,7 @@ class ZoteroModeTests(unittest.TestCase):
 
         self.assertIn("[Reeve 2009](#", normalized)
 
-    def test_build_zotero_docx_context_can_use_direct_companion_without_database(self) -> None:
+    def test_build_zotero_docx_context_can_use_direct_companion_when_zotero_is_disabled(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             tex_path = root / "manuscript.tex"
@@ -114,13 +116,100 @@ class ZoteroModeTests(unittest.TestCase):
                     zotero_item_uri_prefix=None,
                 ),
                 source_text=tex_path.read_text(encoding="utf-8"),
-                enable_zotero=True,
+                enable_zotero=False,
                 zotero_database=root / "missing.sqlite",
             )
 
         self.assertEqual(len(context.bibliography_entries), 1)
         self.assertEqual(context.bibliography_entries[0].item_data["id"], 123)
         self.assertEqual(context.bibliography_entries[0].uri, "http://zotero.org/users/local/items/ABCD1234")
+
+    def test_build_zotero_docx_context_prefers_database_when_zotero_is_enabled(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tex_path = root / "manuscript.tex"
+            tex_path.write_text(
+                "\\begin{document}\\parencite{reeve2009}\\section{参考文献}\\input{refs.bib}\\end{document}\n",
+                encoding="utf-8",
+            )
+            (root / "refs_display.json").write_text('{"reeve2009": "Reeve 2009"}', encoding="utf-8")
+            (root / "refs.bib").write_text(
+                "@article{reeve2009,\n  title = {Demo title},\n  author = {Reeve, John},\n  year = {2009},\n  doi = {10.1000/demo}\n}\n",
+                encoding="utf-8",
+            )
+            (root / "dotex_zotero_items.json").write_text(
+                """
+{
+  "version": 1,
+  "items": [
+    {
+      "key": "reeve2009",
+      "source_key": "10.1000/demo",
+      "formatted_reference": "Companion Reeve 2009",
+      "zotero_item_key": "COMP1234",
+      "uri": "http://zotero.org/users/local/items/COMP1234",
+      "item_data": {
+        "id": 123,
+        "type": "article-journal",
+        "title": "Companion title"
+      }
+    }
+  ]
+}
+""".strip(),
+                encoding="utf-8",
+            )
+            database_path = root / "zotero.sqlite"
+            database_path.write_text("", encoding="utf-8")
+
+            resolver_result = (
+                SimpleNamespace(
+                    records=[
+                        SimpleNamespace(
+                            source_key="10.1000/demo",
+                            matched=True,
+                            zotero_item_key="DBKEY123",
+                            zotero_item_id=999,
+                            zotero_uri="http://zotero.org/users/local/items/DBKEY123",
+                            zotero_doi="10.1000/demo",
+                            zotero_url=None,
+                        )
+                    ]
+                ),
+                [
+                    {
+                        "id": "DBKEY123",
+                        "type": "article-journal",
+                        "title": "Database title",
+                    }
+                ],
+            )
+
+            with patch("dotex.tex_to_docx.resolve_bibliography_against_zotero", return_value=resolver_result):
+                context = build_zotero_docx_context(
+                    tex_path,
+                    TemplateDocxHints(
+                        caption_style_id=None,
+                        table_style_id=None,
+                        table_paragraph_style_id=None,
+                        normal_style_id=None,
+                        title_style_id="Title",
+                        heading_1_style_id="Heading1",
+                        heading_2_style_id="Heading2",
+                        heading_3_style_id="Heading3",
+                        bibliography_style_id=None,
+                        zotero_item_uri_prefix=None,
+                    ),
+                    source_text=tex_path.read_text(encoding="utf-8"),
+                    enable_zotero=True,
+                    zotero_database=database_path,
+                )
+
+        self.assertEqual(len(context.bibliography_entries), 1)
+        self.assertEqual(context.bibliography_entries[0].item_data["id"], 999)
+        self.assertEqual(context.bibliography_entries[0].item_data["title"], "Database title")
+        self.assertEqual(context.bibliography_entries[0].zotero_item_key, "DBKEY123")
+        self.assertEqual(context.bibliography_entries[0].uri, "http://zotero.org/users/local/items/DBKEY123")
 
     def test_table_notice_added_when_tables_present(self) -> None:
         diagnostics = build_initial_conversion_diagnostics(
@@ -365,6 +454,21 @@ class ZoteroModeTests(unittest.TestCase):
         self.assertEqual(target.item_data.get("title"), "Smith 2020")
         self.assertIn(target.source_key, context.by_anchor)
 
+    def test_convert_citation_hyperlinks_skips_targets_without_zotero_identity(self) -> None:
+        document = ET.Element(f"{WORD_ATTR_PREFIX}document")
+        body = ET.SubElement(document, f"{WORD_ATTR_PREFIX}body")
+        paragraph = ET.SubElement(body, f"{WORD_ATTR_PREFIX}p")
+        hyperlink = ET.SubElement(paragraph, f"{WORD_ATTR_PREFIX}hyperlink")
+        run = ET.SubElement(hyperlink, f"{WORD_ATTR_PREFIX}r")
+        text = ET.SubElement(run, f"{WORD_ATTR_PREFIX}t")
+        text.text = "Smith 2020"
+
+        changed = convert_citation_hyperlinks_to_zotero_fields(document, {}, make_context())
+
+        self.assertFalse(changed)
+        self.assertIsNotNone(paragraph.find("./w:hyperlink", {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}))
+        self.assertEqual(len(paragraph.findall(".//w:instrText", {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})), 0)
+
     def test_zotero_fields_are_not_inserted_inside_tables(self) -> None:
         document = ET.Element(f"{WORD_ATTR_PREFIX}document")
         body = ET.SubElement(document, f"{WORD_ATTR_PREFIX}body")
@@ -427,7 +531,7 @@ class ZoteroModeTests(unittest.TestCase):
         self.assertIsNotNone(paragraph.find("./w:hyperlink", {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}))
         self.assertEqual(len(paragraph.findall(".//w:instrText", {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})), 0)
 
-    def test_convert_citation_hyperlinks_prefers_preserved_field_shell(self) -> None:
+    def test_convert_citation_hyperlinks_builds_canonical_field_from_targets(self) -> None:
         document = ET.Element(f"{WORD_ATTR_PREFIX}document")
         body = ET.SubElement(document, f"{WORD_ATTR_PREFIX}body")
         paragraph = ET.SubElement(body, f"{WORD_ATTR_PREFIX}p")
@@ -447,37 +551,20 @@ class ZoteroModeTests(unittest.TestCase):
             anchor_id="Reeve_2009",
         )
         context.by_anchor["Reeve_2009"] = target
-        context.citation_field_shells[(("Reeve_2009",), "(Reeve 2009)")] = [
-            CitationFieldShell(
-                field_nodes_xml=[
-                    '<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:rPr><w:color w:val="003399"/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>',
-                    '<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:rPr><w:color w:val="003399"/><w:lang w:eastAsia="zh-CN"/></w:rPr><w:instrText xml:space="preserve"> ADDIN ZOTERO_ITEM CSL_CITATION {"citationID":"cite-1","properties":{"formattedCitation":"(Reeve 2009)","plainCitation":"Reeve 2009"}} </w:instrText></w:r>',
-                    '<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:rPr><w:color w:val="003399"/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>',
-                    '<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:rPr><w:color w:val="003399"/></w:rPr><w:t>(Reeve 2009)</w:t></w:r>',
-                    '<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:rPr><w:color w:val="003399"/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>',
-                ]
-            )
-        ]
 
         changed = convert_citation_hyperlinks_to_zotero_fields(document, {}, context)
 
         self.assertTrue(changed)
         self.assertEqual(len(paragraph.findall("./w:hyperlink", {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})), 0)
-        instr_run = paragraph.findall("./w:r", {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})[1]
-        lang = instr_run.find(f"{WORD_ATTR_PREFIX}rPr/{WORD_ATTR_PREFIX}lang")
-        self.assertIsNotNone(lang)
-        assert lang is not None
-        self.assertEqual(lang.get(f"{WORD_ATTR_PREFIX}eastAsia"), "zh-CN")
         instr_text = "".join(
             (run.find(f"{WORD_ATTR_PREFIX}instrText").text or "")
             for run in paragraph.findall("./w:r", {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})
             if run.find(f"{WORD_ATTR_PREFIX}instrText") is not None
         )
         self.assertIn('"plainCitation":"(Reeve 2009)"', instr_text)
-        self.assertIn('"noteIndex":0', instr_text)
         self.assertNotIn('"dontUpdate"', instr_text)
-        self.assertRegex(instr_text, r'"citationID":"[A-Za-z0-9]{8}"')
-        self.assertNotIn('"citationID":"cite-1"', instr_text)
+        citation_id_match = re.search(r'"citationID":"([A-Za-z0-9]{8})"', instr_text)
+        self.assertIsNotNone(citation_id_match)
         for run in paragraph.findall("./w:r", {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}):
             fonts = run.find(f"{WORD_ATTR_PREFIX}rPr/{WORD_ATTR_PREFIX}rFonts")
             self.assertIsNone(fonts)
@@ -489,7 +576,43 @@ class ZoteroModeTests(unittest.TestCase):
             self.assertIsNotNone(color)
             assert color is not None
             self.assertEqual(color.get(f"{WORD_ATTR_PREFIX}val"), "003399")
-        self.assertEqual(context.citation_field_shells, {})
+
+    def test_build_zotero_citation_field_preserves_nonbreaking_spaces_in_plain_citation(self) -> None:
+        hyperlink = ET.Element(f"{WORD_ATTR_PREFIX}hyperlink")
+        run = ET.SubElement(hyperlink, f"{WORD_ATTR_PREFIX}r")
+        text = ET.SubElement(run, f"{WORD_ATTR_PREFIX}t")
+        text.text = "(He, Cao, and Tan 2025; Bender et al.\xa02021)"
+
+        target_one = CitationTarget(
+            source_key="he2025",
+            formatted_reference="He, Cao, and Tan 2025",
+            zotero_item_key="PKIQMMGF",
+            item_data={"id": 1676, "title": "He 2025"},
+            uri="http://zotero.org/users/14586934/items/PKIQMMGF",
+            anchor_id="he2025",
+        )
+        target_two = CitationTarget(
+            source_key="bender2021",
+            formatted_reference="Bender et al. 2021",
+            zotero_item_key="33GG8ZHN",
+            item_data={"id": 1552, "title": "Bender 2021"},
+            uri="http://zotero.org/users/14586934/items/33GG8ZHN",
+            anchor_id="bender2021",
+        )
+
+        field_runs = build_zotero_citation_field_elements(
+            "(He, Cao, and Tan 2025; Bender et al.\xa02021)",
+            [target_one, target_two],
+            hyperlink,
+        )
+
+        instr_text = "".join(
+            (run.find(f"{WORD_ATTR_PREFIX}instrText").text or "")
+            for run in field_runs
+            if run.find(f"{WORD_ATTR_PREFIX}instrText") is not None
+        )
+        self.assertIn('"formattedCitation":"(He, Cao, and Tan 2025; Bender et al.\u00a02021)"', instr_text)
+        self.assertIn('"plainCitation":"(He, Cao, and Tan 2025; Bender et al.\u00a02021)"', instr_text)
 
     def test_bookmarks_are_stripped(self) -> None:
         document = ET.Element(f"{WORD_ATTR_PREFIX}document")

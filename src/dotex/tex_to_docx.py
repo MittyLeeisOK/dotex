@@ -111,6 +111,7 @@ class CrossReferenceTarget:
     label: str
     number: str
     caption_text: str
+    prefix: str = ""
     bookmark_name: str | None = None
     referenced: bool = False
 
@@ -180,11 +181,6 @@ class CitationTarget:
 
 
 @dataclass
-class CitationFieldShell:
-    field_nodes_xml: list[str]
-
-
-@dataclass
 class UnmatchedZoteroNotice:
     source_key: str
     formatted_reference: str
@@ -198,7 +194,6 @@ class ZoteroDocxContext:
     by_anchor: dict[str, CitationTarget]
     by_normalized_url: dict[str, CitationTarget]
     by_normalized_doi: dict[str, CitationTarget]
-    citation_field_shells: dict[tuple[tuple[str, ...], str], list[CitationFieldShell]] = field(default_factory=dict)
 
     def lookup(self, target: str | None = None, anchor: str | None = None) -> CitationTarget | None:
         if anchor and anchor in self.by_anchor:
@@ -361,6 +356,66 @@ def convert_hyperref_commands(body: str) -> str:
     return re.sub(r"\\hyperref\[([^\]]+)\]\{([^}]+)\}", replace_hyperref, body)
 
 
+def contains_cjk_text(text: str) -> bool:
+    return re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", text) is not None
+
+
+def infer_reference_prefixes(source_text: str) -> dict[str, str]:
+    prefixes: dict[str, str] = {}
+
+    def record(label: str, prefix: str | None) -> None:
+        canonical = canonicalize_reference_prefix(prefix)
+        if label and canonical and label not in prefixes:
+            prefixes[label] = canonical
+
+    for match in re.finditer(r"\\hyperref\[([^\]]+)\]\{([^}]+)\}", source_text):
+        label, display_text = match.groups()
+        record(label.strip(), extract_reference_prefix(display_text))
+
+    for match in re.finditer(
+        r"(?P<prefix>Table|Figure|Equation|Eq\.?|Appendix|表|图|公式)\s*~?\s*\\ref\*?\{(?P<label>[^}]+)\}",
+        source_text,
+        flags=re.IGNORECASE,
+    ):
+        record(match.group("label").strip(), match.group("prefix"))
+
+    return prefixes
+
+
+def extract_reference_prefix(display_text: str) -> str | None:
+    normalized = re.sub(r"\s+", " ", display_text).strip()
+    for prefix in ("Table", "Figure", "Equation", "Appendix"):
+        if normalized.lower().startswith(prefix.lower()):
+            return prefix
+    for prefix in ("Eq.", "Eq"):
+        if normalized.lower().startswith(prefix.lower()):
+            return "Equation"
+    for prefix in ("表", "图", "公式"):
+        if normalized.startswith(prefix):
+            return prefix
+    return None
+
+
+def canonicalize_reference_prefix(prefix: str | None) -> str | None:
+    if not prefix:
+        return None
+    normalized = re.sub(r"\s+", " ", prefix).strip()
+    if not normalized:
+        return None
+    lowered = normalized.lower().rstrip(".")
+    if lowered == "table":
+        return "Table"
+    if lowered == "figure":
+        return "Figure"
+    if lowered in {"equation", "eq"}:
+        return "Equation"
+    if lowered == "appendix":
+        return "Appendix"
+    if normalized in {"表", "图", "公式"}:
+        return normalized
+    return normalized
+
+
 def normalize_tex_for_pandoc(
     tex_path: Path,
     source_text: str | None = None,
@@ -382,15 +437,29 @@ def normalize_tex_for_pandoc(
         if not metadata.get("authors") and preamble_meta.get("authors"):
             metadata["authors"] = preamble_meta["authors"]
     labels = parse_label_numbers(tex_path.with_suffix(".aux"))
-    global CURRENT_LABELS, CURRENT_LENGTH_CONTEXT, CURRENT_BIBLIOGRAPHY_ANCHORS
+    global CURRENT_LABELS, CURRENT_REFERENCE_PREFIXES, CURRENT_DOCUMENT_USES_CJK, CURRENT_LENGTH_CONTEXT, CURRENT_BIBLIOGRAPHY_ANCHORS
     CURRENT_LABELS = labels
+    CURRENT_REFERENCE_PREFIXES = infer_reference_prefixes(source_text)
+    CURRENT_DOCUMENT_USES_CJK = contains_cjk_text(source_text)
     CURRENT_LENGTH_CONTEXT = length_context or extract_length_context(source_text)
     CURRENT_BIBLIOGRAPHY_ANCHORS = build_bibliography_anchor_map(tex_path, source_text)
 
     body = replace_command_two_args(body, "litref", render_litref_link)
-    body = replace_command_one_arg(body, "tabref", lambda label: render_cross_reference(label, labels, "表"))
-    body = replace_command_one_arg(body, "figref", lambda label: render_cross_reference(label, labels, "图"))
-    body = replace_command_one_arg(body, "eqref", lambda label: render_cross_reference(label, labels, "公式", wrap_parentheses=True))
+    body = replace_command_one_arg(
+        body,
+        "tabref",
+        lambda label: render_cross_reference(label, labels, reference_prefix_for_kind("table", label)),
+    )
+    body = replace_command_one_arg(
+        body,
+        "figref",
+        lambda label: render_cross_reference(label, labels, reference_prefix_for_kind("figure", label)),
+    )
+    body = replace_command_one_arg(
+        body,
+        "eqref",
+        lambda label: render_cross_reference(label, labels, reference_prefix_for_kind("equation", label), wrap_parentheses=True),
+    )
     body = replace_command_one_arg(body, "detokenize", lambda value: value)
     body = replace_generic_refs(body, labels)
     bib_display = _load_refs_display(tex_path.parent)
@@ -912,11 +981,11 @@ def replace_generic_refs(text: str, labels: dict[str, str]) -> str:
     def repl(match: re.Match[str]) -> str:
         label = match.group(1)
         if label.startswith("fig:"):
-            return render_cross_reference(label, labels, "图")
+            return render_cross_reference(label, labels, reference_prefix_for_kind("figure", label))
         if label.startswith("tab:"):
-            return render_cross_reference(label, labels, "表")
+            return render_cross_reference(label, labels, reference_prefix_for_kind("table", label))
         if label.startswith("eq:"):
-            return render_cross_reference(label, labels, "公式")
+            return render_cross_reference(label, labels, reference_prefix_for_kind("equation", label))
         return labels.get(label, label)
 
     return re.sub(r"\\ref\*?\{([^}]+)\}", repl, text)
@@ -1131,12 +1200,28 @@ def make_native_cross_reference_bookmark(label: str) -> str:
 
 
 def caption_prefix_for_kind(kind: str) -> str:
-    mapping = {
-        "figure": "图",
-        "table": "表",
-        "equation": "公式",
-    }
+    mapping = (
+        {
+            "figure": "图",
+            "table": "表",
+            "equation": "公式",
+        }
+        if CURRENT_DOCUMENT_USES_CJK
+        else {
+            "figure": "Figure",
+            "table": "Table",
+            "equation": "Equation",
+        }
+    )
     return mapping.get(kind, kind)
+
+
+def reference_prefix_for_kind(kind: str, label: str | None = None) -> str:
+    if label:
+        explicit = CURRENT_REFERENCE_PREFIXES.get(label)
+        if explicit:
+            return explicit
+    return caption_prefix_for_kind(kind)
 
 
 def sequence_identifier_for_kind(kind: str) -> str:
@@ -1151,15 +1236,23 @@ def sequence_identifier_for_kind(kind: str) -> str:
 def format_numbered_reference(prefix: str, number: str) -> str:
     if not number:
         return prefix
-    return f"{prefix}{number}"
+    separator = " " if prefix and re.search(r"[A-Za-z]$", prefix) else ""
+    return f"{prefix}{separator}{number}"
 
 
-def build_caption_placeholder(kind: str, label: str | None, caption_text: str, number: str | None) -> str:
+def build_caption_placeholder(
+    kind: str,
+    label: str | None,
+    caption_text: str,
+    number: str | None,
+    prefix: str | None = None,
+) -> str:
     payload = {
         "kind": kind,
         "label": label or "",
         "caption": caption_text,
         "number": number or "",
+        "prefix": prefix or "",
     }
     return f"{CAPTION_PLACEHOLDER_PREFIX}{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
 
@@ -1188,16 +1281,18 @@ def parse_caption_placeholder(text: str) -> dict[str, str] | None:
         "label": str(loaded.get("label", "")),
         "caption": str(loaded.get("caption", "")),
         "number": str(loaded.get("number", "")),
+        "prefix": str(loaded.get("prefix", "")),
     }
 
 
 def render_native_caption_block(kind: str, label: str | None, caption: str) -> str:
     caption_text = convert_inline_tex_to_plain(caption)
     number = CURRENT_LABELS.get(label, "") if label else ""
+    prefix = reference_prefix_for_kind(kind, label)
     if not caption_text and not number and not label:
         return ""
     return render_custom_style_block(
-        build_caption_placeholder(kind, label, caption_text, number),
+        build_caption_placeholder(kind, label, caption_text, number, prefix),
         "caption",
     )
 
@@ -1554,7 +1649,7 @@ def format_caption_text(
     if labels is None:
         labels = CURRENT_LABELS
     number = labels.get(label, "") if label else ""
-    prefix = caption_prefix_for_kind(kind)
+    prefix = reference_prefix_for_kind(kind, label)
     if number and caption_text:
         return f"{format_numbered_reference(prefix, number)} {caption_text}".strip()
     if caption_text:
@@ -1952,6 +2047,8 @@ def simplify_column_spec(spec: str) -> str:
 
 
 CURRENT_LABELS: dict[str, str] = {}
+CURRENT_REFERENCE_PREFIXES: dict[str, str] = {}
+CURRENT_DOCUMENT_USES_CJK = True
 
 
 def infer_bibliography_path(source_tex: Path, source_text: str, override: Path | None = None) -> Path | None:
@@ -1996,16 +2093,8 @@ def build_zotero_docx_context(
 ) -> ZoteroDocxContext:
     if source_text is None:
         source_text = source_tex.read_text(encoding="utf-8")
-    bibliography_path = infer_bibliography_path(source_tex, source_text, bibliography_path)
     companion_payload = load_direct_zotero_companion_payload(source_tex)
     direct_targets = load_direct_zotero_targets(source_tex, source_text or "", companion_payload)
-    citation_field_shells = load_direct_citation_field_shells(companion_payload)
-    if bibliography_path is None or not bibliography_path.exists():
-        if direct_targets is not None:
-            return build_direct_zotero_context(direct_targets, citation_field_shells)
-        return ZoteroDocxContext([], [], {}, {}, {})
-    if direct_targets is not None:
-        return build_direct_zotero_context(direct_targets, citation_field_shells)
     if enable_zotero and zotero_database is not None and not zotero_database.exists():
         raise FileNotFoundError(f"Zotero database not found: {zotero_database}")
     if enable_zotero and zotero_database is None and not DEFAULT_ZOTERO_DATABASE.exists():
@@ -2021,6 +2110,14 @@ def build_zotero_docx_context(
                 zotero_database=database_snapshot,
             )
 
+    bibliography_path = infer_bibliography_path(source_tex, source_text, bibliography_path)
+    if bibliography_path is None or not bibliography_path.exists():
+        if direct_targets is not None and not enable_zotero:
+            return build_direct_zotero_context(direct_targets)
+        return ZoteroDocxContext([], [], {}, {}, {})
+    if direct_targets is not None and not enable_zotero:
+        return build_direct_zotero_context(direct_targets)
+
     bibliography_entries = parse_bibliography_entries(bibliography_path)
     if not bibliography_entries:
         refs_bib = (source_tex.parent / "refs.bib").resolve()
@@ -2028,6 +2125,8 @@ def build_zotero_docx_context(
             bibliography_entries = parse_bibliography_entries(refs_bib)
             if bibliography_entries:
                 bibliography_path = refs_bib
+    if not bibliography_entries and direct_targets is not None and not enable_zotero:
+        return build_direct_zotero_context(direct_targets)
     records_by_source: dict[str, object] = {}
     csl_by_key: dict[str, dict] = {}
     unmatched_notices: list[UnmatchedZoteroNotice] = []
@@ -2138,36 +2237,8 @@ def load_direct_zotero_targets(
     return direct_targets or None
 
 
-def load_direct_citation_field_shells(
-    companion_payload: dict | None,
-) -> dict[tuple[tuple[str, ...], str], list[CitationFieldShell]]:
-    if not isinstance(companion_payload, dict):
-        return {}
-    raw_citations = companion_payload.get("citations")
-    if not isinstance(raw_citations, list):
-        return {}
-
-    citation_field_shells: dict[tuple[tuple[str, ...], str], list[CitationFieldShell]] = {}
-    for raw_citation in raw_citations:
-        if not isinstance(raw_citation, dict):
-            continue
-        raw_keys = raw_citation.get("source_keys")
-        raw_field_nodes = raw_citation.get("field_nodes_xml")
-        if not isinstance(raw_keys, list) or not isinstance(raw_field_nodes, list):
-            continue
-        source_keys = [str(key).strip() for key in raw_keys if str(key).strip()]
-        field_nodes_xml = [str(node) for node in raw_field_nodes if isinstance(node, str) and node.strip()]
-        formatted_citation = normalize_citation_display_text(str(raw_citation.get("formatted_citation") or ""))
-        if not source_keys or not field_nodes_xml or not formatted_citation:
-            continue
-        signature = make_citation_field_shell_signature(source_keys, formatted_citation)
-        citation_field_shells.setdefault(signature, []).append(CitationFieldShell(field_nodes_xml=field_nodes_xml))
-    return citation_field_shells
-
-
 def build_direct_zotero_context(
     entries: list[CitationTarget],
-    citation_field_shells: dict[tuple[tuple[str, ...], str], list[CitationFieldShell]] | None = None,
 ) -> ZoteroDocxContext:
     by_anchor = {entry.anchor_id: entry for entry in entries}
     by_url = {
@@ -2180,7 +2251,7 @@ def build_direct_zotero_context(
         for entry in entries
         if (normalized_doi := normalize_doi(entry.source_key))
     }
-    return ZoteroDocxContext(entries, [], by_anchor, by_url, by_doi, citation_field_shells or {})
+    return ZoteroDocxContext(entries, [], by_anchor, by_url, by_doi)
 
 
 def derive_import_url(source_key: str) -> str | None:
@@ -2655,6 +2726,7 @@ def replace_caption_placeholders(
         label = placeholder.get("label", "")
         caption_text = placeholder.get("caption", "")
         number = placeholder.get("number", "")
+        prefix = placeholder.get("prefix", "") or reference_prefix_for_kind(kind, label or None)
         fallback_sequence_numbers[kind] = fallback_sequence_numbers.get(kind, 0) + 1
         display_number = number or str(fallback_sequence_numbers[kind])
         bookmark_name: str | None = None
@@ -2671,8 +2743,8 @@ def replace_caption_placeholders(
         new_children: list[ET.Element] = []
         if bookmark_id is not None and bookmark_name is not None:
             new_children.append(build_bookmark_boundary(bookmark_id, bookmark_name, is_start=True))
-        new_children.append(build_field_run(text=caption_prefix_for_kind(kind) + " ", rpr_template=reference_rpr))
-        new_children.extend(build_sequence_field_elements(kind, display_number, reference_rpr))
+        new_children.append(build_field_run(text=prefix + " ", rpr_template=reference_rpr))
+        new_children.extend(build_sequence_field_elements(kind, display_number, reference_rpr, sequence_identifier=prefix))
         if bookmark_id is not None:
             new_children.append(build_bookmark_boundary(bookmark_id, None, is_start=False))
         if caption_text:
@@ -2684,6 +2756,7 @@ def replace_caption_placeholders(
             label=label or bookmark_name,
             number=display_number,
             caption_text=caption_text,
+            prefix=prefix,
             bookmark_name=bookmark_name,
         )
         diagnostics.cross_reference_targets.append(target)
@@ -2737,7 +2810,7 @@ def rewrite_cross_reference_hyperlinks(
 
 
 def describe_cross_reference_target(target: CrossReferenceTarget) -> str:
-    numbered = format_numbered_reference(caption_prefix_for_kind(target.kind), target.number)
+    numbered = format_numbered_reference(target.prefix or caption_prefix_for_kind(target.kind), target.number)
     if target.caption_text:
         return f"{numbered} {target.caption_text}".strip()
     return numbered
@@ -2778,8 +2851,13 @@ def build_bookmark_boundary(bookmark_id: str, bookmark_name: str | None, is_star
     return bookmark
 
 
-def build_sequence_field_elements(kind: str, display_number: str, rpr_template: ET.Element | None) -> list[ET.Element]:
-    instruction = f" SEQ {sequence_identifier_for_kind(kind)} \\* ARABIC "
+def build_sequence_field_elements(
+    kind: str,
+    display_number: str,
+    rpr_template: ET.Element | None,
+    sequence_identifier: str | None = None,
+) -> list[ET.Element]:
+    instruction = f" SEQ {(sequence_identifier or sequence_identifier_for_kind(kind))} \\* ARABIC "
     return [
         build_field_run(fld_char_type="begin", rpr_template=rpr_template),
         build_field_run(instr_text=instruction, rpr_template=rpr_template),
@@ -3770,6 +3848,11 @@ def convert_citation_hyperlinks_to_zotero_fields(
                 index += 1
                 continue
 
+            field_targets = [target for target, _ in citation_targets]
+            if not can_build_native_zotero_field(field_targets):
+                index = cluster_next_index(children, index, citation_targets, removable_nodes)
+                continue
+
             insert_at = list(paragraph).index(citation_targets[0][1])
             reference_element = citation_targets[0][1]
             for _, removable_node in citation_targets:
@@ -3778,22 +3861,14 @@ def convert_citation_hyperlinks_to_zotero_fields(
                 if removable_node in paragraph:
                     paragraph.remove(removable_node)
 
-            field_targets = [target for target, _ in citation_targets]
             signature = make_citation_field_shell_signature(
                 [target.source_key for target in field_targets],
                 display_text,
             )
             occurrence_index = occurrence_counts.get(signature, 0) + 1
             occurrence_counts[signature] = occurrence_index
-            preserved_field_runs = pop_matching_citation_field_shell(
-                zotero_context,
-                field_targets,
-                display_text,
-                occurrence_index,
-            )
             for offset, field_run in enumerate(
-                preserved_field_runs
-                or build_zotero_citation_field_elements(
+                build_zotero_citation_field_elements(
                     display_text,
                     field_targets,
                     reference_element,
@@ -4203,105 +4278,8 @@ def make_citation_field_shell_signature(
     return tuple(source_keys), normalize_citation_display_text(display_text)
 
 
-def pop_matching_citation_field_shell(
-    zotero_context: ZoteroDocxContext,
-    citation_targets: list[CitationTarget],
-    display_text: str,
-    occurrence_index: int = 1,
-) -> list[ET.Element] | None:
-    signature = make_citation_field_shell_signature(
-        [target.source_key for target in citation_targets],
-        display_text,
-    )
-    matching_shells = zotero_context.citation_field_shells.get(signature)
-    if not matching_shells:
-        return None
-
-    shell = matching_shells[0]
-    try:
-        field_runs = [ET.fromstring(node_xml) for node_xml in shell.field_nodes_xml]
-    except ET.ParseError:
-        return None
-    normalize_preserved_zotero_field_runs(
-        field_runs,
-        display_text,
-        [target.source_key for target in citation_targets],
-        occurrence_index,
-    )
-
-    matching_shells.pop(0)
-    if not matching_shells:
-        del zotero_context.citation_field_shells[signature]
-    return field_runs
-
-
-def normalize_preserved_zotero_field_runs(
-    field_runs: list[ET.Element],
-    display_text: str,
-    source_keys: list[str],
-    occurrence_index: int,
-) -> None:
-    instruction_nodes = [
-        instruction
-        for field_run in field_runs
-        for instruction in field_run.findall(f"{WORD_ATTR_PREFIX}instrText")
-    ]
-    if not instruction_nodes:
-        return
-
-    instruction_text = "".join(instruction.text or "" for instruction in instruction_nodes)
-    if ZOTERO_CITATION_INSTRUCTION_PREFIX not in instruction_text:
-        return
-
-    prefix, raw_payload = instruction_text.split(ZOTERO_CITATION_INSTRUCTION_PREFIX, 1)
-    payload_text = raw_payload.strip()
-    try:
-        payload = json.loads(payload_text)
-    except json.JSONDecodeError:
-        return
-
-    raw_citation_items = payload.get("citationItems")
-    if not isinstance(raw_citation_items, list):
-        raw_citation_items = []
-
-    canonical_payload = build_canonical_zotero_citation_payload(
-        display_text,
-        source_keys,
-        occurrence_index,
-        raw_citation_items,
-        payload,
-    )
-    updated_instruction = (
-        prefix
-        + ZOTERO_CITATION_INSTRUCTION_PREFIX
-        + json.dumps(canonical_payload, ensure_ascii=False, separators=(",", ":"))
-        + " "
-    )
-    if updated_instruction != instruction_text:
-        rewrite_instruction_node_texts(instruction_nodes, updated_instruction)
-
-    for field_run in field_runs:
-        if field_run.tag != f"{WORD_ATTR_PREFIX}r":
-            continue
-        run_properties = field_run.find("w:rPr", XML_NAMESPACES)
-        normalized_properties = ensure_zotero_field_run_properties(run_properties)
-        if run_properties is None:
-            field_run.insert(0, normalized_properties)
-
-
-def rewrite_instruction_node_texts(
-    instruction_nodes: list[ET.Element],
-    updated_instruction: str,
-) -> None:
-    remaining = updated_instruction
-    segment_lengths = [len(node.text or "") for node in instruction_nodes]
-    for index, node in enumerate(instruction_nodes):
-        if index == len(instruction_nodes) - 1:
-            node.text = remaining
-            break
-        segment_length = segment_lengths[index]
-        node.text = remaining[:segment_length]
-        remaining = remaining[segment_length:]
+def can_build_native_zotero_field(citation_targets: list[CitationTarget]) -> bool:
+    return all(target.uri or target.zotero_item_key for target in citation_targets)
 
 
 def build_canonical_zotero_citation_payload(
@@ -4415,7 +4393,7 @@ def build_zotero_citation_field_elements(
 
 
 def plain_citation_text(display_text: str) -> str:
-    return display_text.replace("\xa0", " ").strip()
+    return display_text.strip()
 
 
 def build_field_run(

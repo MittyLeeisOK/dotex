@@ -5,11 +5,11 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from dotex.docx_to_tex import (
     RecoveredBibliographyItem,
-    RecoveredCitationShell,
     build_project_makefile,
     ensure_latex_build_support,
     normalize_converted_latex,
     prepare_docx_for_reverse_conversion,
+    restore_caption_labels_from_docx,
     split_bibliography_section,
     write_citation_support_files,
 )
@@ -61,10 +61,6 @@ class DocxToTexTests(unittest.TestCase):
         self.assertEqual(len(preparation.bibliography_items), 1)
         self.assertEqual(preparation.bibliography_items[0].formatted_reference, "Reeve 2009")
         self.assertEqual(preparation.bibliography_items[0].source_key, "10.1000/demo")
-        self.assertEqual(len(preparation.citation_shells), 1)
-        self.assertEqual(preparation.citation_shells[0].formatted_citation, "(Reeve 2009)")
-        self.assertEqual(preparation.citation_shells[0].source_keys, ["10.1000/demo"])
-        self.assertTrue(any('fldCharType="begin"' in node for node in preparation.citation_shells[0].field_nodes_xml))
 
     def test_split_bibliography_section_writes_input_placeholder(self) -> None:
         latex_text = (
@@ -134,13 +130,6 @@ class DocxToTexTests(unittest.TestCase):
                         },
                     )
                 ],
-                [
-                    RecoveredCitationShell(
-                        source_keys=["10.1000/demo"],
-                        formatted_citation="(Reeve 2009)",
-                        field_nodes_xml=["<w:r xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:fldChar w:fldCharType=\"begin\"/></w:r>"],
-                    )
-                ],
             )
 
             refs_display = (root / "refs_display.json").read_text(encoding="utf-8")
@@ -153,8 +142,7 @@ class DocxToTexTests(unittest.TestCase):
         self.assertIn("@article{reeve2009,", refs_bib)
         self.assertIn("10.1000/demo", refs_bib)
         self.assertIn('"source_key": "10.1000/demo"', zotero_items)
-        self.assertIn('"citations": [', zotero_items)
-        self.assertIn('"formatted_citation": "(Reeve 2009)"', zotero_items)
+        self.assertNotIn('"citations": [', zotero_items)
         self.assertIn("\\dotexregistercitation{reeve2009}{Reeve 2009}", parencite_defs)
 
     def test_normalize_converted_latex_adds_graphicx_and_ctex_when_needed(self) -> None:
@@ -210,6 +198,40 @@ class DocxToTexTests(unittest.TestCase):
         self.assertIn("\\caption{\\textbf{基于SDT的AI教学话语策略与AI默认输出模式的比较}}", supported)
         self.assertNotIn("表 1 组别分配", supported)
         self.assertNotIn("图 3 基于SDT的AI教学话语策略与AI默认输出模式的比较", supported)
+
+        def test_restore_caption_labels_from_docx_recovers_table_bookmark(self) -> None:
+                latex_text = (
+                        "\\begin{longtable}[]{@{}l@{}}\n"
+                        "\\caption{Summary of recent literature on AI counseling}\\tabularnewline\n"
+                        "demo\\tabularnewline\n"
+                        "\\end{longtable}\n"
+                )
+
+                document_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+    <w:body>
+        <w:p>
+            <w:bookmarkStart w:id="2" w:name="_Ref194160781"/>
+            <w:r><w:t xml:space="preserve">Table </w:t></w:r>
+            <w:fldSimple w:instr=" SEQ Table \* ARABIC "><w:r><w:t>1</w:t></w:r></w:fldSimple>
+            <w:bookmarkEnd w:id="2"/>
+            <w:r><w:t xml:space="preserve"> Summary of recent literature on AI counseling</w:t></w:r>
+        </w:p>
+    </w:body>
+</w:document>
+"""
+
+                with TemporaryDirectory() as temp_dir:
+                        source_docx = Path(temp_dir) / "source.docx"
+                        with ZipFile(source_docx, "w", compression=ZIP_DEFLATED) as archive:
+                                archive.writestr("word/document.xml", document_xml)
+
+                        restored = restore_caption_labels_from_docx(latex_text, source_docx)
+
+                self.assertIn(
+                        "\\caption{\\protect\\phantomsection\\label{_Ref194160781}{}Summary of recent literature on AI counseling}\\tabularnewline",
+                        restored,
+                )
 
     def test_ensure_latex_build_support_caps_includegraphics_width(self) -> None:
         latex_text = (

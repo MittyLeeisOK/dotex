@@ -1,6 +1,8 @@
 import unittest
 import xml.etree.ElementTree as ET
 
+import dotex.tex_to_docx as tex_to_docx_module
+
 from dotex.tex_to_docx import (
     DEFAULT_ZOTERO_FIELD_COLOR,
     WORD_ATTR_PREFIX,
@@ -8,6 +10,8 @@ from dotex.tex_to_docx import (
     TemplateDocxHints,
     apply_native_cross_reference_fields,
     build_caption_placeholder,
+    format_numbered_reference,
+    infer_reference_prefixes,
     make_cross_reference_anchor,
 )
 
@@ -111,6 +115,48 @@ class CrossReferenceTests(unittest.TestCase):
         self.assertTrue(
             any("表2 示例表题注 在文内不含交叉引用" in warning for warning in diagnostics.warnings)
         )
+
+    def test_infer_reference_prefixes_supports_english_refs(self) -> None:
+        prefixes = infer_reference_prefixes(
+            r"See Table~\ref{tab:demo}, Figure \ref{fig:demo}, and \hyperref[_Ref1]{Table 7}."
+        )
+
+        self.assertEqual(prefixes["tab:demo"], "Table")
+        self.assertEqual(prefixes["fig:demo"], "Figure")
+        self.assertEqual(prefixes["_Ref1"], "Table")
+        self.assertEqual(format_numbered_reference("Table", "7"), "Table 7")
+        self.assertEqual(format_numbered_reference("表", "7"), "表7")
+
+    def test_caption_placeholder_uses_english_prefix_when_document_is_english(self) -> None:
+        old_document_uses_cjk = tex_to_docx_module.CURRENT_DOCUMENT_USES_CJK
+        old_reference_prefixes = dict(tex_to_docx_module.CURRENT_REFERENCE_PREFIXES)
+        try:
+            tex_to_docx_module.CURRENT_DOCUMENT_USES_CJK = False
+            tex_to_docx_module.CURRENT_REFERENCE_PREFIXES = {"tab:demo": "Table"}
+
+            document = ET.Element(f"{WORD_ATTR_PREFIX}document")
+            body = ET.SubElement(document, f"{WORD_ATTR_PREFIX}body")
+
+            caption_paragraph = ET.SubElement(body, f"{WORD_ATTR_PREFIX}p")
+            caption_run = ET.SubElement(caption_paragraph, f"{WORD_ATTR_PREFIX}r")
+            caption_text = ET.SubElement(caption_run, f"{WORD_ATTR_PREFIX}t")
+            caption_text.text = build_caption_placeholder("table", "tab:demo", "Example table caption", "2")
+
+            diagnostics = ConversionDiagnostics()
+            changed = apply_native_cross_reference_fields(document, make_template_hints(), {}, diagnostics)
+
+            self.assertTrue(changed)
+            self.assertIn(
+                "Table 2 Example table caption",
+                "".join(node.text or "" for node in caption_paragraph.findall(".//w:t", NS)),
+            )
+            caption_instr = caption_paragraph.find(".//w:instrText", NS)
+            self.assertIsNotNone(caption_instr)
+            assert caption_instr is not None
+            self.assertIn("SEQ Table", caption_instr.text or "")
+        finally:
+            tex_to_docx_module.CURRENT_DOCUMENT_USES_CJK = old_document_uses_cjk
+            tex_to_docx_module.CURRENT_REFERENCE_PREFIXES = old_reference_prefixes
 
 
 if __name__ == "__main__":

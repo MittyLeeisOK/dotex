@@ -239,14 +239,9 @@ def build_convert_docx_request(args: argparse.Namespace) -> ConvertDocxRequest:
 def resolve_template_selection(
     stack: ExitStack,
     override: Path | None,
-    tex_path: Path | None = None,
 ) -> TemplateSelection:
     if override is not None:
         return TemplateSelection(path=override.resolve(), is_builtin=False)
-    if tex_path is not None:
-        inferred = infer_roundtrip_reference_template(tex_path)
-        if inferred is not None:
-            return TemplateSelection(path=inferred.resolve(), is_builtin=False)
     template_path = Path(stack.enter_context(as_file(DEFAULT_TEMPLATE_RESOURCE))).resolve()
     return TemplateSelection(path=template_path, is_builtin=True)
 
@@ -370,7 +365,7 @@ def emit_convert_docx_summary(template: TemplateSelection, result, validation_re
 def run_convert_docx(args: argparse.Namespace) -> int:
     request = build_convert_docx_request(args)
     with ExitStack() as stack:
-        template = resolve_template_selection(stack, request.template_override, request.tex_path)
+        template = resolve_template_selection(stack, request.template_override)
         artifacts_dir = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="dotex-artifacts-"))).resolve()
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -409,18 +404,6 @@ def resolve_convert_tex_output_path(docx_path: Path, output: Path | None) -> Pat
     if output.suffix.lower() == ".tex":
         return output
     return output / f"{docx_path.stem}.tex"
-
-
-def infer_roundtrip_reference_template(tex_path: Path) -> Path | None:
-    resolved_tex = tex_path.resolve()
-    candidates = [
-        resolved_tex.with_suffix(".docx"),
-        resolved_tex.parent.parent / f"{resolved_tex.parent.name}.docx",
-    ]
-    for candidate in candidates:
-        if candidate.exists() and candidate.is_file():
-            return candidate.resolve()
-    return None
 
 
 def run_convert_tex(args: argparse.Namespace) -> int:

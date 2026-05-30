@@ -7,7 +7,7 @@ from dotex.cli import (
     build_parser,
     default_docx_output_path,
     default_tex_output_path,
-    infer_roundtrip_reference_template,
+    resolve_template_selection,
     resolve_convert_tex_output_path,
 )
 
@@ -43,17 +43,29 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(resolve_convert_tex_output_path(docx_path, explicit_output), explicit_output)
 
-    def test_infer_roundtrip_reference_template_prefers_sibling_source_docx(self) -> None:
+    def test_resolve_template_selection_defaults_to_builtin_template(self) -> None:
         with TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            project_dir = root / "manuscript_v3"
-            project_dir.mkdir()
-            tex_path = project_dir / "manuscript_v3.tex"
-            tex_path.write_text("", encoding="utf-8")
-            source_docx = root / "manuscript_v3.docx"
-            source_docx.write_text("", encoding="utf-8")
+            from contextlib import ExitStack
 
-            self.assertEqual(infer_roundtrip_reference_template(tex_path), source_docx.resolve())
+            with ExitStack() as stack:
+                selection = resolve_template_selection(stack, None)
+
+            self.assertTrue(selection.is_builtin)
+            self.assertTrue(selection.path.exists())
+
+    def test_resolve_template_selection_uses_explicit_override(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            from contextlib import ExitStack
+
+            root = Path(temp_dir)
+            template_path = root / "explicit-template.docx"
+            template_path.write_text("", encoding="utf-8")
+
+            with ExitStack() as stack:
+                selection = resolve_template_selection(stack, template_path)
+
+            self.assertFalse(selection.is_builtin)
+            self.assertEqual(selection.path, template_path.resolve())
 
     def test_convert_docx_defaults_to_zotero_and_native_refs(self) -> None:
         with TemporaryDirectory() as temp_dir:

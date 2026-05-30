@@ -37,7 +37,7 @@ PARENCITE_DEFS_FILENAME = "parencite_defs.tex"
 ZOTERO_ITEMS_FILENAME = "dotex_zotero_items.json"
 BIBLIOGRAPHY_SECTION_TITLES = ("参考文献", "References", "Bibliography")
 CAPTION_NUMBER_PREFIX_PATTERN = re.compile(
-    r"^(?P<label>图|表|figure|table)\s*(?P<number>\d+)\s*[:：.]?\s*(?P<body>.+?)\s*$",
+    r"^(?P<label>图|表|公式|figure|table|equation|appendix)\s*(?P<number>[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*)\s*[:：.]?\s*(?P<body>.+?)\s*$",
     re.IGNORECASE,
 )
 ZOTERO_CITATION_FIELD_TOKEN = "ADDIN ZOTERO_ITEM CSL_CITATION"
@@ -188,18 +188,10 @@ class RecoveredCitationCommand:
 
 
 @dataclass
-class RecoveredCitationShell:
-    source_keys: list[str]
-    formatted_citation: str
-    field_nodes_xml: list[str]
-
-
-@dataclass
 class ReverseConversionPreparation:
     math_placeholders: dict[str, str]
     citation_placeholders: dict[str, str]
     bibliography_items: list[RecoveredBibliographyItem]
-    citation_shells: list[RecoveredCitationShell]
 
 
 def convert_docx_to_tex(
@@ -252,11 +244,11 @@ def convert_docx_to_tex(
         preserve_refs=not plain_ref,
     )
     latex_text = ensure_fallback_figures(source_docx, latex_text, media_root)
+    latex_text = restore_caption_labels_from_docx(latex_text, source_docx)
     latex_text = ensure_latex_build_support(latex_text)
     citation_support_paths = write_citation_support_files(
         output.parent,
         preparation.bibliography_items,
-        preparation.citation_shells,
     )
     if preparation.bibliography_items:
         latex_text = ensure_parencite_support(latex_text)
@@ -288,7 +280,6 @@ def prepare_docx_for_reverse_conversion(
         math_placeholders={},
         citation_placeholders={},
         bibliography_items=[],
-        citation_shells=[],
     )
     with ZipFile(source_docx) as source_zip:
         archive_entries = [(info, source_zip.read(info.filename)) for info in source_zip.infolist()]
@@ -305,7 +296,6 @@ def prepare_docx_for_reverse_conversion(
             document_tree,
             preparation.citation_placeholders,
             preparation.bibliography_items,
-            preparation.citation_shells,
         )
     updated_document = ET.tostring(document_tree, encoding="utf-8", xml_declaration=True)
 
@@ -322,7 +312,6 @@ def replace_zotero_citation_fields_with_placeholders(
     document_tree: ET.Element,
     citation_placeholders: dict[str, str],
     bibliography_items: list[RecoveredBibliographyItem],
-    citation_shells: list[RecoveredCitationShell],
 ) -> None:
     item_index: dict[str, RecoveredBibliographyItem] = {}
     used_keys: set[str] = set()
@@ -332,7 +321,6 @@ def replace_zotero_citation_fields_with_placeholders(
             citation_placeholders,
             item_index,
             used_keys,
-            citation_shells,
         )
     bibliography_items.extend(item_index.values())
 
@@ -342,7 +330,6 @@ def replace_zotero_citation_fields_in_paragraph(
     citation_placeholders: dict[str, str],
     item_index: dict[str, RecoveredBibliographyItem],
     used_keys: set[str],
-    citation_shells: list[RecoveredCitationShell],
 ) -> None:
     children = list(paragraph)
     index = 0
@@ -362,13 +349,6 @@ def replace_zotero_citation_fields_in_paragraph(
             continue
         placeholder = f"TEXDOCXCITE{len(citation_placeholders)}TOKEN"
         citation_placeholders[placeholder] = recovered_citation.latex_command
-        citation_shells.append(
-            RecoveredCitationShell(
-                source_keys=list(recovered_citation.source_keys),
-                formatted_citation=extract_formatted_citation(payload, field_nodes),
-                field_nodes_xml=[ET.tostring(node, encoding="unicode") for node in field_nodes],
-            )
-        )
         replacement_run = clone_run_with_text(field_nodes[0], placeholder)
         for node in field_nodes:
             paragraph.remove(node)
@@ -775,6 +755,97 @@ def flatten_cross_reference_markup(latex_text: str) -> str:
     return flattened
 
 
+def restore_caption_labels_from_docx(latex_text: str, source_docx: Path) -> str:
+    caption_labels = extract_caption_labels_from_docx(source_docx)
+    if not caption_labels:
+        return latex_text
+
+    lines = latex_text.splitlines(keepends=True)
+    return "".join(restore_caption_label_in_line(line, caption_labels) for line in lines)
+
+
+def restore_caption_label_in_line(line: str, caption_labels: dict[str, str]) -> str:
+    newline = "\n" if line.endswith("\n") else ""
+    core = line[:-1] if newline else line
+
+    bold_match = re.match(r"(?P<prefix>\s*\\caption\{)(?P<content>\\textbf\{.*?\})(?P<suffix>\}\s*)$", core)
+    if bold_match is not None:
+        content = bold_match.group("content")
+        if "\\label{" in content:
+            return line
+        bookmark_name = caption_labels.get(normalize_caption_lookup_text(content))
+        if not bookmark_name:
+            return line
+        rebuilt = (
+            f"{bold_match.group('prefix')}\\protect\\phantomsection\\label{{{bookmark_name}}}{{}}"
+            f"{content}{bold_match.group('suffix')}{newline}"
+        )
+        return rebuilt
+
+    plain_match = re.match(
+        r"(?P<prefix>\s*\\caption\{)(?P<content>(?:\\protect\\phantomsection\\label\{[^}]+\}\{\})?.*?)(?P<suffix>\}\s*(?:\\tabularnewline\s*)?)$",
+        core,
+    )
+    if plain_match is None:
+        return line
+
+    content = plain_match.group("content")
+    if "\\label{" in content:
+        return line
+    bookmark_name = caption_labels.get(normalize_caption_lookup_text(content))
+    if not bookmark_name:
+        return line
+    rebuilt = (
+        f"{plain_match.group('prefix')}\\protect\\phantomsection\\label{{{bookmark_name}}}{{}}"
+        f"{content}{plain_match.group('suffix')}{newline}"
+    )
+    return rebuilt
+
+
+def extract_caption_labels_from_docx(source_docx: Path) -> dict[str, str]:
+    with ZipFile(source_docx) as archive:
+        document_root = ET.fromstring(archive.read("word/document.xml"))
+
+    body = document_root.find("w:body", XML_NAMESPACES)
+    if body is None:
+        return {}
+
+    caption_labels: dict[str, str] = {}
+    for paragraph in body.findall("w:p", XML_NAMESPACES):
+        bookmark_names = [
+            bookmark.get(f"{WORD_ATTR_PREFIX}name")
+            for bookmark in paragraph.findall("w:bookmarkStart", XML_NAMESPACES)
+            if (bookmark.get(f"{WORD_ATTR_PREFIX}name") or "").startswith("_Ref")
+        ]
+        if not bookmark_names:
+            continue
+        text = paragraph_text(paragraph)
+        if CAPTION_NUMBER_PREFIX_PATTERN.match(text.strip()) is None:
+            continue
+        normalized = normalize_caption_lookup_text(text)
+        if normalized and normalized not in caption_labels:
+            caption_labels[normalized] = bookmark_names[0] or ""
+    return caption_labels
+
+
+def normalize_caption_lookup_text(text: str) -> str:
+    normalized = re.sub(r"\\protect\\phantomsection\\label\{[^}]+\}\{\}", "", text)
+    normalized = re.sub(r"\\label\{[^}]+\}(?:\{\})?", "", normalized)
+    normalized = re.sub(r"\\textbf\{(.*?)\}", r"\1", normalized)
+    normalized = strip_caption_number_prefix(normalized)
+    normalized = (
+        normalized.replace(r"\&", "&")
+        .replace(r"\%", "%")
+        .replace(r"\_", "_")
+        .replace(r"\#", "#")
+        .replace(r"\{", "{")
+        .replace(r"\}", "}")
+        .replace("~", " ")
+    )
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized.casefold()
+
+
 def ensure_latex_build_support(latex_text: str) -> str:
     supported = latex_text
     supported = ensure_latex_package(supported, PAGE_LAYOUT_PACKAGE)
@@ -1027,7 +1098,6 @@ def write_bibliography_companion(project_dir: Path, bibliography_text: str | Non
 def write_citation_support_files(
     project_dir: Path,
     bibliography_items: list[RecoveredBibliographyItem],
-    citation_shells: list[RecoveredCitationShell] | None = None,
 ) -> list[Path]:
     support_paths = [
         project_dir / REFS_DISPLAY_FILENAME,
@@ -1051,7 +1121,7 @@ def write_citation_support_files(
     refs_bib_path.write_text(build_refs_bib_text(bibliography_items), encoding="utf-8")
 
     zotero_items_path = project_dir / ZOTERO_ITEMS_FILENAME
-    zotero_items_path.write_text(build_zotero_items_payload(bibliography_items, citation_shells or []), encoding="utf-8")
+    zotero_items_path.write_text(build_zotero_items_payload(bibliography_items), encoding="utf-8")
 
     parencite_defs_path = project_dir / PARENCITE_DEFS_FILENAME
     parencite_defs_path.write_text(build_parencite_defs_text(bibliography_items), encoding="utf-8")
@@ -1145,7 +1215,6 @@ def escape_bibtex_value(value: str) -> str:
 
 def build_zotero_items_payload(
     bibliography_items: list[RecoveredBibliographyItem],
-    citation_shells: list[RecoveredCitationShell] | None = None,
 ) -> str:
     payload = {
         "version": 1,
@@ -1161,15 +1230,6 @@ def build_zotero_items_payload(
             for item in bibliography_items
         ],
     }
-    if citation_shells:
-        payload["citations"] = [
-            {
-                "source_keys": citation_shell.source_keys,
-                "formatted_citation": citation_shell.formatted_citation,
-                "field_nodes_xml": citation_shell.field_nodes_xml,
-            }
-            for citation_shell in citation_shells
-        ]
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
