@@ -15,3 +15,4 @@ src/dotex.egg-info/entry_points.txt
 src/dotex.egg-info/requires.txt
 src/dotex.egg-info/top_level.txt
 src/dotex/templates/default_reference.docx
+tests/test_zotero_mode.py
