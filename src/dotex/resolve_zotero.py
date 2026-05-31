@@ -76,6 +76,7 @@ class ResolutionRecord:
     zotero_url: str | None
     zotero_doi: str | None
     zotero_uri: str | None
+    duplicate_candidates: list[str] | None = None
 
 
 @dataclass
@@ -125,6 +126,7 @@ def resolve_bibliography_against_zotero(
 
         entry_doi = normalize_doi(entry.source_key)
         entry_url = normalize_url(entry.source_key)
+        duplicate_candidates: list[str] | None = None
         if entry_doi and entry_doi in doi_index:
             matched_item = doi_index[entry_doi]
             matched_by = "doi"
@@ -136,6 +138,8 @@ def resolve_bibliography_against_zotero(
             if len(candidates) == 1:
                 matched_item = candidates[0]
                 matched_by = "title"
+            elif len(candidates) > 1:
+                duplicate_candidates = [candidate.item_key for candidate in candidates]
 
         if matched_item is not None:
             matched_items[matched_item.item_key] = matched_item
@@ -154,6 +158,7 @@ def resolve_bibliography_against_zotero(
                 zotero_url=matched_item.fields.get("url") if matched_item else None,
                 zotero_doi=matched_item.fields.get("DOI") if matched_item else None,
                 zotero_uri=matched_item.uri if matched_item else None,
+                duplicate_candidates=duplicate_candidates,
             )
         )
 

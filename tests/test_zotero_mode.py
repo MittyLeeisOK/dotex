@@ -1,10 +1,12 @@
+import json
 import re
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from zipfile import ZipFile
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from dotex.tex_to_docx import (
     DEFAULT_ZOTERO_FIELD_COLOR,
@@ -18,12 +20,15 @@ from dotex.tex_to_docx import (
     TableLayoutHint,
     TemplateDocxHints,
     apply_bibliography_hints,
+    audit_zotero_docx,
     apply_table_hints,
     build_zotero_docx_context,
     build_initial_conversion_diagnostics,
+    build_zotero_bibliography_instruction,
     build_zotero_citation_field_elements,
     convert_citation_hyperlinks_to_zotero_fields,
     normalize_tex_for_pandoc,
+    parse_litref_options,
     normalize_internal_anchor_bookmarks,
     normalize_tree_run_fonts,
     prune_unused_hyperlink_relationships_for_part,
@@ -32,6 +37,16 @@ from dotex.tex_to_docx import (
     style_default_internal_hyperlinks,
     strip_all_bookmarks,
     strip_internal_hyperlink_styles,
+)
+from dotex.zotero_import import (
+    ZoteroImportSession,
+    build_bibtex_payload,
+    classify_resolution_records,
+    handle_missing_zotero_items,
+    ensure_dotex_collection,
+    post_connector_import,
+    redact_api_key,
+    record_to_zotero_api_item,
 )
 from dotex.resolve_zotero import build_zotero_item_uri, parse_bibliography_entries
 
@@ -47,6 +62,210 @@ def make_context() -> ZoteroDocxContext:
 
 
 class ZoteroModeTests(unittest.TestCase):
+
+    def test_litref_optional_parameters_are_preserved_in_zotero_item(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tex_path = root / "manuscript.tex"
+            tex_path.write_text(
+                "\\begin{document}\\litref[locator=23,label=page,prefix=see,suffix=for review,suppress-author=true]{doi-demo}{Smith 2024}\\end{document}",
+                encoding="utf-8",
+            )
+            normalized = normalize_tex_for_pandoc(tex_path, use_citation_hyperlinks=True)
+
+        self.assertIn("[Smith 2024]", normalized)
+        paragraph = ET.Element(f"{WORD_ATTR_PREFIX}p")
+        hyperlink = ET.SubElement(paragraph, f"{WORD_ATTR_PREFIX}hyperlink")
+        hyperlink.set(f"{WORD_ATTR_PREFIX}anchor", "bib-doi-demo")
+        run = ET.SubElement(hyperlink, f"{WORD_ATTR_PREFIX}r")
+        text = ET.SubElement(run, f"{WORD_ATTR_PREFIX}t")
+        text.text = "Smith 2024"
+        target = CitationTarget(
+            source_key="doi-demo",
+            formatted_reference="Smith 2024",
+            zotero_item_key="SMITH2024",
+            item_data={"id": 1, "type": "article-journal", "title": "Demo"},
+            uri="http://zotero.org/users/local/items/SMITH2024",
+            anchor_id="doi-demo",
+        )
+        context = ZoteroDocxContext([target], [], {"bib-doi-demo": target}, {}, {})
+        resolved = resolve_citation_hyperlink_target(hyperlink, {}, context)
+
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        self.assertEqual(resolved.citation_options["locator"], "23")
+        self.assertEqual(resolved.citation_options["label"], "page")
+        self.assertEqual(resolved.citation_options["prefix"], "see")
+        self.assertEqual(resolved.citation_options["suffix"], "for review")
+        self.assertTrue(resolved.citation_options["suppress-author"])
+
+        field_runs = build_zotero_citation_field_elements("Smith 2024", [resolved], hyperlink)
+        instr_text = "".join(
+            (run.find(f"{WORD_ATTR_PREFIX}instrText").text or "")
+            for run in field_runs
+            if run.find(f"{WORD_ATTR_PREFIX}instrText") is not None
+        )
+        self.assertIn('"locator":"23"', instr_text)
+        self.assertIn('"suppress-author":true', instr_text)
+
+    def test_parse_litref_options_accepts_supported_local_parameters(self) -> None:
+        options = parse_litref_options("locator=12,label=chapter,author-only=true,unknown=no")
+
+        self.assertEqual(options, {"locator": "12", "label": "chapter", "author-only": True})
+
+    def test_embedded_zotero_fallback_is_default_and_marked_embedded(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tex_path = root / "manuscript.tex"
+            tex_path.write_text(
+                "\\begin{document}\\parencite{reeve2009}\\section{参考文献}\\input{refs.bib}\\end{document}\n",
+                encoding="utf-8",
+            )
+            (root / "refs_display.json").write_text('{"reeve2009": "Reeve 2009"}', encoding="utf-8")
+            (root / "refs.bib").write_text(
+                "@article{reeve2009,\n  title = {Demo title},\n  author = {Reeve, John},\n  year = {2009},\n  doi = {10.1000/demo}\n}\n",
+                encoding="utf-8",
+            )
+            database_path = root / "zotero.sqlite"
+            database_path.write_text("", encoding="utf-8")
+            resolver_result = (SimpleNamespace(records=[SimpleNamespace(source_key="10.1000/demo", formatted_reference="Reeve 2009", parsed_title="Demo title", matched=False, zotero_item_key=None, zotero_item_id=None, zotero_uri=None)]), [])
+            hints = TemplateDocxHints(None, None, None, None, "Title", "Heading1", "Heading2", "Heading3", None, None)
+
+            with patch("dotex.tex_to_docx.resolve_bibliography_against_zotero", return_value=resolver_result), patch("dotex.tex_to_docx.handle_missing_zotero_items"):
+                context = build_zotero_docx_context(
+                    tex_path,
+                    hints,
+                    source_text=tex_path.read_text(encoding="utf-8"),
+                    enable_zotero=True,
+                    zotero_database=database_path,
+                )
+
+        self.assertFalse(context.bibliography_entries[0].zotero_item_key)
+        self.assertTrue(context.bibliography_entries[0].embedded)
+        self.assertTrue(str(context.bibliography_entries[0].item_data["id"]).startswith("dotex/"))
+        self.assertEqual(context.bibliography_entries[0].uri, "https://doi.org/10.1000/demo")
+
+
+    def test_unmatched_zotero_detection_and_ignore_prompt_is_cached(self) -> None:
+        records = [
+            SimpleNamespace(source_key="10.1000/demo", formatted_reference="Demo", parsed_title="Demo", matched=False),
+            SimpleNamespace(source_key="", formatted_reference="Missing", parsed_title=None, matched=False),
+        ]
+        classification = classify_resolution_records(records)
+        session = ZoteroImportSession()
+        output = Mock()
+
+        first = handle_missing_zotero_items(
+            classification,
+            [],
+            session=session,
+            input_func=lambda _prompt: "ignore",
+            output_func=output,
+        )
+        second = handle_missing_zotero_items(
+            classification,
+            [],
+            session=session,
+            input_func=lambda _prompt: (_ for _ in ()).throw(AssertionError("prompt repeated")),
+            output_func=output,
+        )
+
+        self.assertEqual(first.mode, "ignore")
+        self.assertEqual(second.mode, "ignore")
+        self.assertEqual(len(classification.unmatched), 1)
+        self.assertEqual(len(classification.insufficient_metadata), 1)
+        self.assertTrue(any("不会直接写入 zotero.sqlite" in str(call.args[0]) for call in output.call_args_list))
+
+    def test_local_connector_import_uses_bibtex_payload_and_connector_endpoint(self) -> None:
+        payloads = []
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def fake_urlopen(req, timeout=0):
+            payloads.append(req)
+            return FakeResponse()
+
+        with patch("dotex.zotero_import.request.urlopen", side_effect=fake_urlopen):
+            post_connector_import("@article{demo,\n  title = {Demo}\n}\n", base_url="http://127.0.0.1:23119", session_id="s1")
+
+        request = payloads[0]
+        self.assertIn("/connector/import?session=s1", request.full_url)
+        self.assertEqual(request.get_method(), "POST")
+        self.assertIn("application/x-bibtex", request.headers["Content-type"] or request.headers["Content-Type"])
+        self.assertEqual(request.headers["X-zotero-connector-api-version"], "2")
+        self.assertIn(b"@article", request.data)
+
+    def test_bibtex_payload_deduplicates_same_doi(self) -> None:
+        records = [
+            SimpleNamespace(source_key="https://doi.org/10.1000/demo", parsed_title="Demo", formatted_reference="Demo", matched=False),
+            SimpleNamespace(source_key="10.1000/demo", parsed_title="Demo", formatted_reference="Demo", matched=False),
+        ]
+
+        payload = build_bibtex_payload(records, [])
+
+        self.assertEqual(payload.count("@article"), 1)
+        self.assertIn("doi = {10.1000/demo}", payload)
+
+
+    def test_web_api_collection_rules_create_or_reuse_dotex_date_collection(self) -> None:
+        today = __import__("datetime").date.today().strftime("%y-%m-%d")
+
+        class FakeClient:
+            def __init__(self):
+                self.collections = []
+                self.created = []
+
+            def list_collections(self):
+                return [{"data": item} for item in self.collections]
+
+            def create_collection(self, name, parent_key=None):
+                item = {"key": f"K{len(self.collections) + 1}", "name": name, "parentCollection": parent_key}
+                self.collections.append(item)
+                self.created.append((name, parent_key))
+                return item
+
+        client = FakeClient()
+
+        first_key = ensure_dotex_collection(client)
+        second_key = ensure_dotex_collection(client)
+
+        self.assertEqual(first_key, second_key)
+        self.assertEqual(client.created, [("Dotex", None), (today, "K1")])
+
+    def test_web_api_item_payload_associates_target_collection_without_fake_numeric_id(self) -> None:
+        item = record_to_zotero_api_item(
+            SimpleNamespace(source_key="10.1000/demo", parsed_title="Demo", formatted_reference="Demo"),
+            "COLLECTION",
+        )
+
+        self.assertEqual(item["collections"], ["COLLECTION"])
+        self.assertEqual(item["DOI"], "10.1000/demo")
+        self.assertNotIn("itemID", item)
+
+    def test_api_key_redaction(self) -> None:
+        self.assertNotIn("SECRET", redact_api_key("failed SECRET request", "SECRET"))
+
+    def test_bibliography_instruction_marks_uncited_entries(self) -> None:
+        cited = CitationTarget("cited", "Cited 2024", "CITED", {"id": 1, "type": "book", "title": "Cited"}, "http://zotero.org/users/local/items/CITED", "cited")
+        uncited = CitationTarget("uncited", "Uncited 2024", "UNCITED", {"id": 2, "type": "book", "title": "Uncited"}, "http://zotero.org/users/local/items/UNCITED", "uncited")
+        context = ZoteroDocxContext([cited, uncited], [], {}, {}, {}, {"cited"})
+
+        instruction = build_zotero_bibliography_instruction(context)
+
+        self.assertIn('"uncited"', instruction)
+        self.assertIn('"id":2', instruction)
+        self.assertNotIn('"id":1', instruction)
+
     def test_normalize_tex_for_pandoc_uses_internal_anchor_links_for_citations(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -613,6 +832,48 @@ class ZoteroModeTests(unittest.TestCase):
         )
         self.assertIn('"formattedCitation":"(He, Cao, and Tan 2025; Bender et al.\u00a02021)"', instr_text)
         self.assertIn('"plainCitation":"(He, Cao, and Tan 2025; Bender et al.\u00a02021)"', instr_text)
+
+
+    def test_zotero_audit_detects_duplicate_citation_ids_and_bibliography_json(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            docx_path = Path(temp_dir) / "audit.docx"
+            payload = {
+                "citationID": "ABCDEFGH",
+                "properties": {"plainCitation": "Smith 2024", "formattedCitation": "Smith 2024", "noteIndex": 0},
+                "citationItems": [{"id": 1, "uris": ["http://zotero.org/users/local/items/SMITH2024"], "itemData": {"id": 1, "type": "book", "title": "Demo"}}],
+                "schema": "https://github.com/citation-style-language/schema/raw/master/csl-citation.json",
+            }
+            instruction = " ADDIN ZOTERO_ITEM CSL_CITATION " + json.dumps(payload, separators=(",", ":")) + " "
+            bibliography_instruction = ' ADDIN ZOTERO_BIBL {"uncited":[],"omitted":[],"custom":[]} CSL_BIBLIOGRAPHY '
+            document_xml = f"""<?xml version='1.0' encoding='utf-8'?>
+<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>
+  <w:body>
+    {self._field_xml(instruction, 'Smith 2024')}
+    {self._field_xml(instruction, 'Smith 2024')}
+    {self._field_xml(bibliography_instruction, 'Smith, Demo')}
+  </w:body>
+</w:document>
+""".encode("utf-8")
+            with ZipFile(docx_path, "w") as docx_zip:
+                docx_zip.writestr("word/document.xml", document_xml)
+
+            audit = audit_zotero_docx(docx_path)
+
+        self.assertEqual(audit["summary"]["citation_count"], 2)
+        self.assertEqual(audit["summary"]["bibliography_field_count"], 1)
+        self.assertFalse(audit["summary"]["passed"])
+        self.assertTrue(any("duplicate citationID" in error["reason"] for error in audit["errors"]))
+
+    def _field_xml(self, instruction: str, visible: str) -> str:
+        return f"""
+<w:p>
+  <w:r><w:fldChar w:fldCharType='begin'/></w:r>
+  <w:r><w:instrText>{instruction.replace('&', '&amp;')}</w:instrText></w:r>
+  <w:r><w:fldChar w:fldCharType='separate'/></w:r>
+  <w:r><w:t>{visible}</w:t></w:r>
+  <w:r><w:fldChar w:fldCharType='end'/></w:r>
+</w:p>
+"""
 
     def test_bookmarks_are_stripped(self) -> None:
         document = ET.Element(f"{WORD_ATTR_PREFIX}document")

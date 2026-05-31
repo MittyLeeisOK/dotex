@@ -5,7 +5,7 @@ import json
 import re
 import xml.etree.ElementTree as ET
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
@@ -18,6 +18,7 @@ from dotex.resolve_zotero import (
     parse_bibliography_entries,
     resolve_bibliography_against_zotero,
 )
+from dotex.zotero_import import classify_resolution_records, handle_missing_zotero_items
 
 
 WORD_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -41,6 +42,7 @@ ET.register_namespace("r", RELATIONSHIP_NAMESPACE)
 DEFAULT_PAPER_WIDTH_TWIPS = int(round(8.27 * 1440))
 CURRENT_LENGTH_CONTEXT: dict[str, float] = {}
 CURRENT_BIBLIOGRAPHY_ANCHORS: dict[str, str] = {}
+CURRENT_CITATION_OPTIONS: dict[tuple[str, str], dict[str, object]] = {}
 DEFAULT_ZOTERO_FIELD_COLOR = "003399"
 DEFAULT_INTERNAL_LINK_COLOR = DEFAULT_ZOTERO_FIELD_COLOR
 ZOTERO_CITATION_INSTRUCTION_PREFIX = " ADDIN ZOTERO_ITEM CSL_CITATION "
@@ -122,6 +124,7 @@ class ConversionDiagnostics:
     notices: list[str] = field(default_factory=list)
     cross_reference_targets: list[CrossReferenceTarget] = field(default_factory=list)
     fallback_citation_count: int = 0
+    zotero_audit: dict | None = None
 
     def add_warning(self, message: str) -> None:
         if message not in self.warnings:
@@ -178,6 +181,8 @@ class CitationTarget:
     item_data: dict
     uri: str | None
     anchor_id: str
+    citation_options: dict[str, object] = field(default_factory=dict)
+    embedded: bool = False
 
 
 @dataclass
@@ -194,6 +199,7 @@ class ZoteroDocxContext:
     by_anchor: dict[str, CitationTarget]
     by_normalized_url: dict[str, CitationTarget]
     by_normalized_doi: dict[str, CitationTarget]
+    cited_source_keys: set[str] = field(default_factory=set)
 
     def lookup(self, target: str | None = None, anchor: str | None = None) -> CitationTarget | None:
         if anchor and anchor in self.by_anchor:
@@ -297,6 +303,13 @@ def convert_tex_to_docx(
         enable_zotero=enable_zotero,
         use_native_bookmarks=use_native_bookmarks,
     )
+    if enable_zotero:
+        audit = audit_zotero_docx(output)
+        diagnostics.zotero_audit = audit
+        audit_path = output.with_suffix(".zotero-audit.json")
+        audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
+        if not audit.get("summary", {}).get("passed", False):
+            diagnostics.add_warning(f"Zotero audit found {audit.get('summary', {}).get('error_count', 0)} issue(s); see {audit_path}")
 
     return ConversionResult(
         source_tex=source_tex,
@@ -437,14 +450,15 @@ def normalize_tex_for_pandoc(
         if not metadata.get("authors") and preamble_meta.get("authors"):
             metadata["authors"] = preamble_meta["authors"]
     labels = parse_label_numbers(tex_path.with_suffix(".aux"))
-    global CURRENT_LABELS, CURRENT_REFERENCE_PREFIXES, CURRENT_DOCUMENT_USES_CJK, CURRENT_LENGTH_CONTEXT, CURRENT_BIBLIOGRAPHY_ANCHORS
+    global CURRENT_LABELS, CURRENT_REFERENCE_PREFIXES, CURRENT_DOCUMENT_USES_CJK, CURRENT_LENGTH_CONTEXT, CURRENT_BIBLIOGRAPHY_ANCHORS, CURRENT_CITATION_OPTIONS
     CURRENT_LABELS = labels
     CURRENT_REFERENCE_PREFIXES = infer_reference_prefixes(source_text)
     CURRENT_DOCUMENT_USES_CJK = contains_cjk_text(source_text)
     CURRENT_LENGTH_CONTEXT = length_context or extract_length_context(source_text)
     CURRENT_BIBLIOGRAPHY_ANCHORS = build_bibliography_anchor_map(tex_path, source_text)
+    CURRENT_CITATION_OPTIONS = {}
 
-    body = replace_command_two_args(body, "litref", render_litref_link)
+    body = replace_litref_commands(body)
     body = replace_command_one_arg(
         body,
         "tabref",
@@ -1184,8 +1198,88 @@ def render_bibliography_entries(bib_path: Path) -> str:
     return "\n\n".join(entries)
 
 
-def render_litref_link(target: str, text: str) -> str:
+def replace_litref_commands(text: str) -> str:
+    token = "\\litref"
+    chunks: list[str] = []
+    index = 0
+    while index < len(text):
+        if text.startswith(token, index) and (index + len(token) == len(text) or not text[index + len(token)].isalpha()):
+            cursor = skip_whitespace(text, index + len(token))
+            options: dict[str, object] = {}
+            if cursor < len(text) and text[cursor] == "[":
+                try:
+                    option_text, cursor = read_bracketed(text, cursor)
+                    options = parse_litref_options(option_text)
+                    cursor = skip_whitespace(text, cursor)
+                except ValueError:
+                    chunks.append(text[index])
+                    index += 1
+                    continue
+            try:
+                target, cursor = read_braced(text, cursor)
+                cursor = skip_whitespace(text, cursor)
+                display, cursor = read_braced(text, cursor)
+            except ValueError:
+                chunks.append(text[index])
+                index += 1
+                continue
+            chunks.append(render_litref_link(target, display, options))
+            index = cursor
+            continue
+        chunks.append(text[index])
+        index += 1
+    return "".join(chunks)
+
+
+def read_bracketed(text: str, start: int) -> tuple[str, int]:
+    if start >= len(text) or text[start] != "[":
+        raise ValueError("expected opening bracket")
+    depth = 0
+    parts: list[str] = []
+    index = start
+    while index < len(text):
+        char = text[index]
+        if char == "[" and not is_escaped(text, index):
+            depth += 1
+            if depth > 1:
+                parts.append(char)
+        elif char == "]" and not is_escaped(text, index):
+            depth -= 1
+            if depth == 0:
+                return "".join(parts), index + 1
+            parts.append(char)
+        else:
+            parts.append(char)
+        index += 1
+    raise ValueError("unclosed bracket")
+
+
+def parse_litref_options(option_text: str) -> dict[str, object]:
+    allowed = {"locator", "label", "prefix", "suffix", "suppress-author", "author-only"}
+    options: dict[str, object] = {}
+    for part in option_text.split(","):
+        if not part.strip():
+            continue
+        if "=" in part:
+            key, value = part.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+        else:
+            key = part.strip()
+            value = "true"
+        if key not in allowed:
+            continue
+        if key in {"suppress-author", "author-only"}:
+            options[key] = value.casefold() in {"1", "true", "yes", "on"}
+        elif value:
+            options[key] = value
+    return options
+
+
+def render_litref_link(target: str, text: str, options: dict[str, object] | None = None) -> str:
     anchor = CURRENT_BIBLIOGRAPHY_ANCHORS.get(target.strip(), make_bibliography_anchor_id(target))
+    if options:
+        CURRENT_CITATION_OPTIONS[(anchor, normalize_citation_display_text(text))] = dict(options)
     return f"[{text}](#{anchor})"
 
 
@@ -2134,8 +2228,19 @@ def build_zotero_docx_context(
     if enable_zotero and zotero_database.exists():
         try:
             report, csl_items = resolve_bibliography_against_zotero(bibliography_path, zotero_database)
+        except Exception:
+            records_by_source = {}
+            csl_by_key = {}
+            unmatched_notices = []
+        else:
             records_by_source = {record.source_key: record for record in report.records}
             csl_by_key = {str(item.get("id")): item for item in csl_items}
+            classification = classify_resolution_records(report.records)
+            if classification.has_missing:
+                handle_missing_zotero_items(classification, bibliography_entries)
+                report, csl_items = resolve_bibliography_against_zotero(bibliography_path, zotero_database)
+                records_by_source = {record.source_key: record for record in report.records}
+                csl_by_key = {str(item.get("id")): item for item in csl_items}
             unmatched_notices = [
                 UnmatchedZoteroNotice(
                     source_key=record.source_key,
@@ -2145,10 +2250,6 @@ def build_zotero_docx_context(
                 for record in report.records
                 if not getattr(record, "matched", False)
             ]
-        except Exception:
-            records_by_source = {}
-            csl_by_key = {}
-            unmatched_notices = []
 
     resolved_entries: list[CitationTarget] = []
     by_anchor: dict[str, CitationTarget] = {}
@@ -2159,12 +2260,20 @@ def build_zotero_docx_context(
         record = records_by_source.get(entry.source_key)
         zotero_item_key = getattr(record, "zotero_item_key", None)
         zotero_item_id = getattr(record, "zotero_item_id", None)
+        matched = bool(getattr(record, "matched", False))
         item_data = synthesize_citation_item_data(entry, record, csl_by_key, index)
         if zotero_item_id is not None:
             item_data["id"] = zotero_item_id
         uri = getattr(record, "zotero_uri", None)
+        embedded = False
         if uri is None and zotero_item_key and template_hints.zotero_item_uri_prefix:
             uri = f"{template_hints.zotero_item_uri_prefix}{zotero_item_key}"
+        if enable_zotero and not matched and not uri and not zotero_item_key:
+            embedded_data = synthesize_embedded_zotero_item_data(entry, item_data)
+            if has_complete_embedded_item_data(embedded_data):
+                item_data = embedded_data
+                embedded = True
+                uri = first_embedded_uri(embedded_data)
         anchor_id = anchor_map.get(entry.source_key, make_bibliography_anchor_id(entry.source_key))
 
         target = CitationTarget(
@@ -2174,6 +2283,7 @@ def build_zotero_docx_context(
             item_data=item_data,
             uri=uri,
             anchor_id=anchor_id,
+            embedded=embedded,
         )
         resolved_entries.append(target)
         by_anchor[anchor_id] = target
@@ -2289,6 +2399,39 @@ def synthesize_citation_item_data(entry, report_record: object | None, csl_by_ke
     return item_data
 
 
+def stable_dotex_item_id(source_key: str, item_data: dict | None = None) -> str:
+    doi = normalize_doi(source_key) or normalize_doi((item_data or {}).get("DOI"))
+    url = normalize_url(source_key) or normalize_url((item_data or {}).get("URL"))
+    seed = doi or url or source_key
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+    return f"dotex/{digest}"
+
+
+def synthesize_embedded_zotero_item_data(entry, base_item_data: dict) -> dict:
+    item_data = dict(base_item_data)
+    item_id = stable_dotex_item_id(entry.source_key, item_data)
+    item_data["id"] = item_id
+    item_data.setdefault("type", "article-journal" if normalize_doi(entry.source_key) or item_data.get("DOI") else "webpage")
+    if entry.parsed_title and not item_data.get("title"):
+        item_data["title"] = entry.parsed_title
+    if not item_data.get("title"):
+        item_data["title"] = entry.formatted_reference
+    normalized_doi = normalize_doi(entry.source_key) or normalize_doi(item_data.get("DOI"))
+    normalized_url = normalize_url(entry.source_key) or normalize_url(item_data.get("URL"))
+    if normalized_doi:
+        item_data["DOI"] = normalized_doi
+    if normalized_url:
+        item_data["URL"] = normalized_url
+    return item_data
+
+
+def first_embedded_uri(item_data: dict) -> str | None:
+    doi = normalize_doi(item_data.get("DOI"))
+    if doi:
+        return f"https://doi.org/{doi}"
+    return normalize_url(item_data.get("URL"))
+
+
 def postprocess_generated_docx(
     output_docx: Path,
     template_docx: Path,
@@ -2316,6 +2459,8 @@ def postprocess_generated_docx(
     changed |= apply_table_hints(document_tree, template_hints, document_layout_hints)
     changed |= apply_figure_hints(document_tree, document_layout_hints)
     changed |= apply_body_paragraph_hints(document_tree, template_hints, bibliography_heading)
+    if enable_zotero:
+        changed |= convert_citation_hyperlinks_to_zotero_fields(document_tree, relationship_targets, zotero_context)
     changed |= apply_bibliography_hints(
         document_tree,
         template_hints,
@@ -2323,8 +2468,6 @@ def postprocess_generated_docx(
         bibliography_heading=bibliography_heading,
         enable_zotero=enable_zotero,
     )
-    if enable_zotero:
-        changed |= convert_citation_hyperlinks_to_zotero_fields(document_tree, relationship_targets, zotero_context)
     changed |= apply_native_cross_reference_fields(
         document_tree,
         template_hints,
@@ -3780,7 +3923,7 @@ def apply_bibliography_hints(
         reference_rpr = first_run_properties(first_paragraph)
         insert_at = paragraph_content_insert_index(first_paragraph)
         instruction_runs = build_instruction_field_runs(
-            ' ADDIN ZOTERO_BIBL {"uncited":[],"omitted":[],"custom":[]} CSL_BIBLIOGRAPHY ',
+            build_zotero_bibliography_instruction(zotero_context),
             reference_rpr,
         )
         first_paragraph.insert(insert_at, build_field_run(fld_char_type="begin", rpr_template=reference_rpr))
@@ -3806,6 +3949,23 @@ def apply_bibliography_hints(
         body.insert(insert_index, end_paragraph)
         changed = True
     return changed
+
+
+def build_zotero_bibliography_instruction(zotero_context: ZoteroDocxContext) -> str:
+    uncited = []
+    for entry in zotero_context.bibliography_entries:
+        if entry.source_key in zotero_context.cited_source_keys:
+            continue
+        item_data = dict(entry.item_data)
+        item_id = item_data.get("id", entry.zotero_item_key or entry.source_key)
+        item_data["id"] = item_id
+        uncited.append({
+            "id": item_id,
+            "uris": [entry.uri] if entry.uri else [],
+            "itemData": item_data,
+        })
+    payload = {"uncited": uncited, "omitted": [], "custom": []}
+    return " ADDIN ZOTERO_BIBL " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + " CSL_BIBLIOGRAPHY "
 
 
 def convert_citation_hyperlinks_to_zotero_fields(
@@ -3867,6 +4027,7 @@ def convert_citation_hyperlinks_to_zotero_fields(
             )
             occurrence_index = occurrence_counts.get(signature, 0) + 1
             occurrence_counts[signature] = occurrence_index
+            zotero_context.cited_source_keys.update(target.source_key for target in field_targets)
             for offset, field_run in enumerate(
                 build_zotero_citation_field_elements(
                     display_text,
@@ -3983,6 +4144,13 @@ def resolve_citation_hyperlink_target(
     relationship_targets: dict[str, str],
     zotero_context: ZoteroDocxContext,
 ) -> CitationTarget | None:
+    def with_local_options(target: CitationTarget, anchor_value: str | None) -> CitationTarget:
+        key = (anchor_value or target.anchor_id, normalize_citation_display_text(display_text))
+        options = CURRENT_CITATION_OPTIONS.get(key)
+        if not options:
+            return target
+        return replace(target, citation_options=dict(options))
+
     if element.tag != f"{WORD_ATTR_PREFIX}hyperlink":
         return None
     display_text = get_element_text(element)
@@ -3994,11 +4162,11 @@ def resolve_citation_hyperlink_target(
             if target is not None:
                 zotero_context.by_anchor[anchor] = target
         if target is not None:
-            return target
+            return with_local_options(target, anchor)
         display_target = zotero_context.lookup_display_text(display_text)
         if display_target is not None:
             zotero_context.by_anchor[anchor] = display_target
-            return display_target
+            return with_local_options(display_target, anchor)
         if looks_like_citation_display_text(display_text):
             fallback_target = synthesize_inline_citation_target(display_text, anchor)
             zotero_context.by_anchor[anchor] = fallback_target
@@ -4014,24 +4182,24 @@ def resolve_citation_hyperlink_target(
                 if resolved_target is not None:
                     zotero_context.by_anchor[target_anchor] = resolved_target
             if resolved_target is not None:
-                return resolved_target
+                return with_local_options(resolved_target, target_anchor)
             display_target = zotero_context.lookup_display_text(display_text)
             if display_target is not None:
                 zotero_context.by_anchor[target_anchor] = display_target
-                return display_target
+                return with_local_options(display_target, target_anchor)
             if looks_like_citation_display_text(display_text):
                 fallback_target = synthesize_inline_citation_target(display_text, target_anchor)
                 zotero_context.by_anchor[target_anchor] = fallback_target
                 return fallback_target
         resolved_target = zotero_context.lookup(target)
         if resolved_target is not None:
-            return resolved_target
+            return with_local_options(resolved_target, None)
         display_target = zotero_context.lookup_display_text(display_text)
         if display_target is not None:
-            return display_target
+            return with_local_options(display_target, None)
     display_target = zotero_context.lookup_display_text(display_text)
     if display_target is not None:
-        return display_target
+        return with_local_options(display_target, None)
     if looks_like_citation_display_text(display_text):
         synthetic_anchor = make_anchor_id(f"inline-cite-{display_text}")
         fallback_target = synthesize_inline_citation_target(display_text, synthetic_anchor)
@@ -4279,7 +4447,16 @@ def make_citation_field_shell_signature(
 
 
 def can_build_native_zotero_field(citation_targets: list[CitationTarget]) -> bool:
-    return all(target.uri or target.zotero_item_key for target in citation_targets)
+    return all(
+        target.uri
+        or target.zotero_item_key
+        or (target.embedded and has_complete_embedded_item_data(target.item_data))
+        for target in citation_targets
+    )
+
+
+def has_complete_embedded_item_data(item_data: dict) -> bool:
+    return bool(item_data.get("id") and item_data.get("type") and item_data.get("title"))
 
 
 def build_canonical_zotero_citation_payload(
@@ -4367,13 +4544,13 @@ def build_zotero_citation_field_elements(
         item_data = dict(citation_target.item_data)
         item_id = item_data.get("id", citation_target.zotero_item_key or citation_target.source_key)
         item_data["id"] = item_id
-        citation_items.append(
-            {
-                "id": item_id,
-                "uris": [citation_target.uri] if citation_target.uri else [],
-                "itemData": item_data,
-            }
-        )
+        citation_item = {
+            "id": item_id,
+            "uris": [citation_target.uri] if citation_target.uri else [],
+            "itemData": item_data,
+        }
+        citation_item.update(citation_target.citation_options)
+        citation_items.append(citation_item)
         source_keys.append(citation_target.source_key)
 
     payload = build_canonical_zotero_citation_payload(
@@ -4394,6 +4571,151 @@ def build_zotero_citation_field_elements(
 
 def plain_citation_text(display_text: str) -> str:
     return display_text.strip()
+
+
+def audit_zotero_docx(docx_path: Path) -> dict:
+    with ZipFile(docx_path) as docx_zip:
+        document_xml = docx_zip.read("word/document.xml")
+    document_tree = ET.fromstring(document_xml)
+    fields = extract_word_fields(document_tree)
+    citation_reports: list[dict] = []
+    bibliography_reports: list[dict] = []
+    errors: list[dict] = []
+    citation_ids: Counter[str] = Counter()
+    citation_index = 0
+    for field in fields:
+        instruction = field["instruction"]
+        if "ZOTERO_ITEM" in instruction and "CSL_CITATION" in instruction:
+            citation_index += 1
+            report = audit_zotero_citation_field(citation_index, field)
+            citation_reports.append(report)
+            if report.get("citationID"):
+                citation_ids[str(report["citationID"])] += 1
+            errors.extend(report.get("errors", []))
+        elif "ZOTERO_BIBL" in instruction and "CSL_BIBLIOGRAPHY" in instruction:
+            report = audit_zotero_bibliography_field(len(bibliography_reports) + 1, field)
+            bibliography_reports.append(report)
+            errors.extend(report.get("errors", []))
+    duplicate_ids = {cid for cid, count in citation_ids.items() if count > 1}
+    if duplicate_ids:
+        for report in citation_reports:
+            if report.get("citationID") in duplicate_ids:
+                error = {
+                    "kind": "citation",
+                    "citation_index": report["index"],
+                    "visible_text": report.get("visible_text", ""),
+                    "source_keys": report.get("source_keys", []),
+                    "reason": f"duplicate citationID {report.get('citationID')}",
+                }
+                report.setdefault("errors", []).append(error)
+                errors.append(error)
+    summary = {
+        "citation_count": len(citation_reports),
+        "bibliography_field_count": len(bibliography_reports),
+        "error_count": len(errors),
+        "passed": len(errors) == 0,
+    }
+    return {"summary": summary, "citations": citation_reports, "bibliographies": bibliography_reports, "errors": errors}
+
+
+def extract_word_fields(document_tree: ET.Element) -> list[dict[str, str]]:
+    fields: list[dict[str, str]] = []
+    stack: list[dict[str, object]] = []
+    for run in document_tree.findall(".//w:r", XML_NAMESPACES):
+        fld_char = run.find("w:fldChar", XML_NAMESPACES)
+        instr_text = run.find("w:instrText", XML_NAMESPACES)
+        text = run.find("w:t", XML_NAMESPACES)
+        if fld_char is not None:
+            fld_type = fld_char.get(f"{WORD_ATTR_PREFIX}fldCharType")
+            if fld_type == "begin":
+                stack.append({"instruction": [], "visible": [], "after_separate": False})
+            elif fld_type == "separate" and stack:
+                stack[-1]["after_separate"] = True
+            elif fld_type == "end" and stack:
+                field = stack.pop()
+                fields.append({
+                    "instruction": "".join(field["instruction"]),
+                    "visible_text": "".join(field["visible"]),
+                })
+            continue
+        if not stack:
+            continue
+        current = stack[-1]
+        if instr_text is not None:
+            current["instruction"].append(instr_text.text or "")
+        elif text is not None and current.get("after_separate"):
+            current["visible"].append(text.text or "")
+    return fields
+
+
+def extract_json_between(instruction: str, start_marker: str, end_marker: str | None = None) -> str:
+    start = instruction.find(start_marker)
+    if start == -1:
+        raise ValueError(f"missing {start_marker}")
+    start += len(start_marker)
+    remainder = instruction[start:]
+    if end_marker and end_marker in remainder:
+        remainder = remainder[: remainder.rfind(end_marker)]
+    return remainder.strip()
+
+
+def audit_zotero_citation_field(index: int, field: dict[str, str]) -> dict:
+    visible_text = field.get("visible_text", "")
+    report: dict[str, object] = {"index": index, "visible_text": visible_text, "errors": [], "source_keys": []}
+    try:
+        payload = json.loads(extract_json_between(field["instruction"], "CSL_CITATION"))
+    except Exception as exc:
+        report["errors"].append(audit_error("citation", index, visible_text, [], f"citation JSON parse failed: {exc}"))
+        return report
+    citation_id = payload.get("citationID")
+    report["citationID"] = citation_id
+    for key in ("citationID", "properties", "citationItems", "schema"):
+        if key not in payload:
+            report["errors"].append(audit_error("citation", index, visible_text, [], f"missing {key}"))
+    properties = payload.get("properties") if isinstance(payload.get("properties"), dict) else {}
+    citation_items = payload.get("citationItems") if isinstance(payload.get("citationItems"), list) else []
+    report["source_keys"] = [str(item.get("id")) for item in citation_items if isinstance(item, dict) and item.get("id") is not None]
+    plain = str(properties.get("plainCitation", ""))
+    if normalize_audit_text(plain) != normalize_audit_text(visible_text):
+        report["errors"].append(audit_error("citation", index, visible_text, report["source_keys"], "properties.plainCitation differs from visible text"))
+    if not isinstance(properties.get("noteIndex"), int):
+        report["errors"].append(audit_error("citation", index, visible_text, report["source_keys"], "properties.noteIndex is not an integer"))
+    if not isinstance(payload.get("citationItems"), list) or not citation_items:
+        report["errors"].append(audit_error("citation", index, visible_text, [], "citationItems is missing or empty"))
+    for item_index, item in enumerate(citation_items, start=1):
+        if not isinstance(item, dict):
+            report["errors"].append(audit_error("citation", index, visible_text, report["source_keys"], f"citationItem {item_index} is not an object"))
+            continue
+        has_uri = bool(item.get("uris"))
+        has_numeric_id = isinstance(item.get("id"), int) or (isinstance(item.get("id"), str) and item.get("id", "").isdigit())
+        has_item_data = isinstance(item.get("itemData"), dict) and has_complete_embedded_item_data(item["itemData"])
+        if not (has_uri or has_numeric_id or has_item_data):
+            report["errors"].append(audit_error("citation", index, visible_text, report["source_keys"], f"citationItem {item_index} lacks uris, numeric id, and complete itemData"))
+    return report
+
+
+def audit_zotero_bibliography_field(index: int, field: dict[str, str]) -> dict:
+    report: dict[str, object] = {"index": index, "visible_text": field.get("visible_text", ""), "errors": []}
+    try:
+        payload = json.loads(extract_json_between(field["instruction"], "ZOTERO_BIBL", "CSL_BIBLIOGRAPHY"))
+        report["uncited_count"] = len(payload.get("uncited", [])) if isinstance(payload, dict) and isinstance(payload.get("uncited", []), list) else 0
+    except Exception as exc:
+        report["errors"].append(audit_error("bibliography", index, report["visible_text"], [], f"bibliography JSON parse failed: {exc}"))
+    return report
+
+
+def audit_error(kind: str, citation_index: int, visible_text: str, source_keys: object, reason: str) -> dict:
+    return {
+        "kind": kind,
+        "citation_index": citation_index,
+        "visible_text": visible_text,
+        "source_keys": source_keys,
+        "reason": reason,
+    }
+
+
+def normalize_audit_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text.replace("\xa0", " ")).strip()
 
 
 def build_field_run(
