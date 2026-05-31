@@ -35,6 +35,8 @@ Current stable target:
 - DOCX -> TeX -> DOCX and direct TeX -> DOCX should converge to the same canonical Zotero citation payload shape.
 - The document should preserve editable Zotero fields, Word-native REF/SEQ caption references, hidden `_Ref...` bookmarks, and package-level Zotero metadata.
 - Plain output is opt-in via downgrade flags only.
+- Do not add user-facing Zotero mode flags for normal TeX -> DOCX conversion; missing-item resolution and embedded fallback are internal default behavior.
+- If bibliography entries are not found in the local Zotero library, dotex must surface the problem and let the user choose local Connector import, Web API import, or ignore for the current run.
 
 Current module naming convention:
 

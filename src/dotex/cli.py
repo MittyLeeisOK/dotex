@@ -348,6 +348,15 @@ def emit_convert_docx_summary(template: TemplateSelection, result, validation_re
         print(f"NOTICE: {notice}")
     for warning in result.diagnostics.warnings:
         print(f"WARNING: {warning}")
+    if result.diagnostics.zotero_audit is not None:
+        summary = result.diagnostics.zotero_audit.get("summary", {})
+        print(
+            "Zotero audit: "
+            f"citations {summary.get('citation_count', 0)}; "
+            f"bibliography fields {summary.get('bibliography_field_count', 0)}; "
+            f"errors {summary.get('error_count', 0)}; "
+            f"pass={summary.get('passed', False)}"
+        )
 
     print(
         "Self-check: "
