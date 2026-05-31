@@ -82,6 +82,40 @@ This is enough for many cases, but repeated citations can still collide if they 
 
 If future stability work is needed, the next improvement target is a stronger occurrence-level key.
 
+
+## Missing Zotero item handling
+
+The converter must not silently pretend that a bibliography entry is a native Zotero item when DOI/URL/title resolution against the local library fails.
+
+Current default flow:
+
+1. Resolve bibliography entries against a read-only snapshot of the local Zotero sqlite database.
+2. Classify records as `matched`, `unmatched`, `insufficient_metadata`, or `duplicate_candidates`.
+3. If missing records exist and no current-run decision has been made, prompt once for local Connector import, Web API import, or ignore.
+4. After a local or Web API import attempt, re-run resolution before building fields.
+5. If a record is still unmatched but has enough metadata, emit embedded CSL itemData with a stable `dotex/<hash>` id. This is an embedded fallback, not a claim that the item exists in Zotero.
+
+Never do these things:
+
+- never write directly to `~/Zotero/zotero.sqlite`
+- never forge a Zotero numeric itemID for an unmatched item
+- never silently bulk-import records without user confirmation
+- never make embedded fallback a user-facing conversion option
+- never add extra Zotero mode flags for normal conversion unless the product direction changes explicitly
+
+Local Connector import rules:
+
+- use Zotero Connector HTTP APIs such as `/connector/import` with BibTeX/RIS/CSL JSON payloads
+- tell the user that the import goes to Zotero Desktop's currently selected library/collection
+- recommend `Dotex/yy-mm-dd`, but do not claim local collection creation unless Zotero exposes an official local write API for it
+
+Web API import rules:
+
+- use the Zotero Web API with `Zotero-API-Key`, `Zotero-API-Version`, and `Zotero-Schema-Version` headers
+- create or reuse `Dotex/yy-mm-dd` only in Web API mode
+- deduplicate by DOI, URL, or title before import
+- never print API keys in normal logs or error text
+
 ## Package-level parts that matter to Zotero
 
 Field XML is not the whole story.

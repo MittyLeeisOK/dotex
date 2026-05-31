@@ -23,7 +23,7 @@ The only downgrade switches are:
 - `--plaincitation`
 - `--plainref`
 
-If an implementation change makes rich behavior opt-in again, that is a regression.
+If an implementation change makes rich behavior opt-in again, that is a regression. Do not add special conversion flags such as embedded-Zotero or strict-audit toggles for the default TeX -> DOCX workflow; the user should provide the direction and file path, and the pipeline should handle Zotero compatibility internally.
 
 ## Control paths that matter
 
@@ -62,6 +62,7 @@ Critical responsibilities:
 - rebuild Word-native caption and cross-reference fields
 - preserve package-level Zotero metadata from the reference DOCX
 - canonicalize emitted citation payloads so direct and roundtrip outputs converge
+- detect bibliography entries that do not resolve to Zotero items, invoke the current-run missing-item handling decision, and re-run resolution after import attempts
 
 ## Invariants that must hold
 
@@ -73,6 +74,7 @@ Critical responsibilities:
 - emitted payloads use 8-character alphanumeric `citationID` values
 - legacy `cite-...` ids are repaired when encountered in dirty source shells
 - `dontUpdate` is omitted from canonical emitted payloads
+- unmatched references with sufficient metadata may be emitted as embedded CSL itemData by default, but must be clearly represented with stable `dotex/<hash>` ids and never as fake Zotero numeric itemIDs
 
 ### Caption and cross-reference invariants
 
